@@ -1,0 +1,156 @@
+// Copyright 2023 Mikael Lund
+//
+// Licensed under the Apache license, version 2.0 (the "license");
+// you may not use this file except in compliance with the license.
+// You may obtain a copy of the license at
+//
+//     http://www.apache.org/licenses/license-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the license is distributed on an "as is" basis,
+// without warranties or conditions of any kind, either express or implied.
+// See the license for the specific language governing permissions and
+// limitations under the license.
+
+//! ## Twobody interactions
+//!
+//! Module for describing exactly two particle interacting with each other.
+//!
+//! - Hard-sphere overlap
+//! - Harmonic potential
+//! - Powerlaw potentials
+//!   - Mie
+//!   - Lennard-Jones
+//!   - Weeks-Chandler-Andersen
+
+use crate::{Info, Vector3};
+use serde::{Deserialize, Serialize};
+use std::fmt::Debug;
+
+mod electrostatic;
+mod hardsphere;
+mod harmonic;
+mod mie;
+pub use self::electrostatic::{IonIon, IonIonPlain, IonIonYukawa};
+pub use self::hardsphere::HardSphere;
+pub use self::harmonic::Harmonic;
+pub use self::mie::{LennardJones, Mie, WeeksChandlerAndersen};
+
+/// Relative orientation between a pair of anisotropic particles
+/// # Todo
+/// Unfinished and still not desided how to implement
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RelativeOrientation {
+    /// Distance between the two particles
+    pub distance: Vector3,
+    pub orientation: Vector3,
+}
+
+/// Potential energy between a pair of anisotropic particles
+pub trait AnisotropicTwobodyEnergy: Info + Debug {
+    fn anisotropic_twobody_energy(&self, orientation: &RelativeOrientation) -> f64;
+}
+
+/// Potential energy between a pair of isotropic particles
+pub trait IsotropicTwobodyEnergy: Info + Debug + AnisotropicTwobodyEnergy {
+    /// Interaction energy between a pair of isotropic particles
+    fn isotropic_twobody_energy(&self, distance_squared: f64) -> f64;
+}
+
+/// All isotropic potentials implement the anisotropic trait
+impl<T: IsotropicTwobodyEnergy> AnisotropicTwobodyEnergy for T {
+    fn anisotropic_twobody_energy(&self, orientation: &RelativeOrientation) -> f64 {
+        self.isotropic_twobody_energy(orientation.distance.norm_squared())
+    }
+}
+
+/// Combine twobody energies
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Combined<T, U>(T, U);
+
+impl<T: IsotropicTwobodyEnergy, U: IsotropicTwobodyEnergy> Combined<T, U> {
+    pub fn new(t: T, u: U) -> Self {
+        Self(t, u)
+    }
+}
+
+impl<T: IsotropicTwobodyEnergy, U: IsotropicTwobodyEnergy> IsotropicTwobodyEnergy
+    for Combined<T, U>
+{
+    #[inline]
+    fn isotropic_twobody_energy(&self, distance_squared: f64) -> f64 {
+        self.0.isotropic_twobody_energy(distance_squared)
+            + self.1.isotropic_twobody_energy(distance_squared)
+    }
+}
+
+impl<T: IsotropicTwobodyEnergy, U: IsotropicTwobodyEnergy> Info for Combined<T, U> {
+    fn citation(&self) -> Option<&'static str> {
+        todo!("Implement citation for Combined");
+    }
+}
+
+/// Plain Coulomb potential combined with Lennard-Jones
+pub type CoulombLennardJones<'a> = Combined<IonIon<'a, crate::multipole::Coulomb>, LennardJones>;
+
+/// Yukawa potential combined with Lennard-Jones
+pub type YukawaLennardJones<'a> = Combined<IonIon<'a, crate::multipole::Yukawa>, LennardJones>;
+
+// test Combined
+#[test]
+pub fn test_combined() {
+    use approx::assert_relative_eq;
+    let r2 = 0.5;
+    let lj = LennardJones::new(0.5, 1.0);
+    let harmonic = Harmonic::new(0.0, 10.0);
+    let u_lj = lj.isotropic_twobody_energy(r2);
+    let u_harmonic = harmonic.isotropic_twobody_energy(r2);
+    let combined = Combined::new(lj, harmonic);
+    assert_relative_eq!(combined.isotropic_twobody_energy(r2), u_lj + u_harmonic);
+}
+
+/*
+/// Enum with all two-body variants.
+///
+/// Use for serialization and deserialization of two-body interactions in
+/// e.g. user input.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum TwobodyKind {
+    HardSphere(HardSphere),
+    Harmonic(Harmonic),
+    #[serde(rename = "lj")]
+    LennardJones(LennardJones),
+    #[serde(rename = "wca")]
+    WeeksChandlerAndersen(WeeksChandlerAndersen),
+}
+
+// Test TwobodyKind for serialization
+#[test]
+fn test_twobodykind_serialize() {
+    let hardsphere = TwobodyKind::HardSphere(HardSphere::new(1.0));
+    assert_eq!(
+        serde_json::to_string(&hardsphere).unwrap(),
+        "{\"hardsphere\":{\"σ\":1.0}}"
+    );
+
+    let harmonic = TwobodyKind::Harmonic(Harmonic::new(1.0, 0.5));
+    assert_eq!(
+        serde_json::to_string(&harmonic).unwrap(),
+        "{\"harmonic\":{\"r₀\":1.0,\"k\":0.5}}"
+    );
+
+    let lj = TwobodyKind::LennardJones(LennardJones::new(0.1, 2.5));
+    assert_eq!(
+        serde_json::to_string(&lj).unwrap(),
+        "{\"lj\":{\"ε\":0.1,\"σ\":2.5}}"
+    );
+
+    let lennard_jones = LennardJones::new(0.1, 2.5);
+    let wca = TwobodyKind::WeeksChandlerAndersen(WeeksChandlerAndersen::new(lennard_jones));
+    assert_eq!(
+        serde_json::to_string(&wca).unwrap(),
+        "{\"wca\":{\"ε\":0.1,\"σ\":2.5}}"
+    );
+}
+*/
