@@ -1,4 +1,4 @@
-// Copyright 2023 Mikael Lund
+// Copyright 2023-2024 Mikael Lund
 //
 // Licensed under the Apache license, version 2.0 (the "license");
 // you may not use this file except in compliance with the license.
@@ -12,51 +12,43 @@
 // See the license for the specific language governing permissions and
 // limitations under the license.
 
-//! Implementation of the harmonic potential.
+//! Implementation of the Morse potential.
 
 use super::IsotropicTwobodyEnergy;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-/// Harmonic potential
-///
-/// $$ u(r) = \frac{1}{2} k (r - r_{eq})^2 $$
-///
-/// where $k$ is the spring constant and $r_{eq}$ is the equilibrium distance.
-/// More information [here](https://en.wikipedia.org/wiki/Harmonic_oscillator).
-///
-/// # Examples
-/// ~~~
-/// use interatomic::twobody::{Harmonic, IsotropicTwobodyEnergy};
-/// let harmonic = Harmonic::new(1.0, 0.5);
-/// let distance: f64 = 2.0;
-/// assert_eq!(harmonic.isotropic_twobody_energy(distance.powi(2)), 0.25);
-/// ~~~
+/// Morse potential.
+/// See <https://en.wikipedia.org/wiki/Morse_potential>.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(
     feature = "serde",
     derive(Deserialize, Serialize),
     serde(deny_unknown_fields)
 )]
-pub struct Harmonic {
+pub struct Morse {
     #[cfg_attr(feature = "serde", serde(rename = "req"))]
-    eq_distance: f64,
+    equilibrium_distance: f64,
+    #[cfg_attr(feature = "serde", serde(rename = "d"))]
+    well_depth: f64,
     #[cfg_attr(feature = "serde", serde(rename = "k"))]
-    spring_constant: f64,
+    force_constant: f64,
+    // shouldn't the parameter a, the 'width of the well' also be present?
 }
 
-impl Harmonic {
-    pub fn new(eq_distance: f64, spring_constant: f64) -> Self {
+impl Morse {
+    pub fn new(equilibrium_distance: f64, well_depth: f64, force_constant: f64) -> Self {
         Self {
-            eq_distance,
-            spring_constant,
+            equilibrium_distance,
+            well_depth,
+            force_constant,
         }
     }
 }
 
-impl IsotropicTwobodyEnergy for Harmonic {
+impl IsotropicTwobodyEnergy for Morse {
     #[inline(always)]
-    fn isotropic_twobody_energy(&self, distance_squared: f64) -> f64 {
-        0.5 * self.spring_constant * (distance_squared.sqrt() - self.eq_distance).powi(2)
+    fn isotropic_twobody_energy(&self, _distance_squared: f64) -> f64 {
+        todo!("Morse potential is not yet implemented");
     }
 }
