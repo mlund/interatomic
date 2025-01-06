@@ -1,6 +1,6 @@
 [package]
 name = "interatomic"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Library for calculating inter-particle interactions"
 readme = "README.md"
@@ -9,8 +9,7 @@ license = "Apache-2.0"
 categories = ["science"]
 keywords = ["pairwise_interaction", "chemistry", "chemical_bond", "pair_potential"]
 documentation = "https://docs.rs/interatomic"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+repository = "https://github.com/mlund/interatomic"
 
 [lib]
 
@@ -21,7 +20,7 @@ itertools = "0.10"
 nalgebra = { version = "0.33", features = ["serde-serialize"] }
 num = "0.4"
 physical_constants = "0.5"
-coulomb = {version = "0", path = "../coulomb"}
+coulomb = {version = "0.2", path = "../coulomb"}
 dyn-clone = "1.0.17"
 
 [dev-dependencies]
