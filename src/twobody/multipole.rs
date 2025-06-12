@@ -99,13 +99,10 @@ pub type IonIonPlain<'a> = IonIon<coulomb::pairwise::Plain>;
 #[cfg_attr(feature = "serde", derive(Serialize))]
 pub struct IonIonPolar<T: MultipoleEnergy> {
     pub ionion: IonIon<T>,
-    /// Excess polarizability of the ion in Å³
+    /// Common excess polarizability of the ion in Å³
     alpha: f64,
-    /// Charges of the two ions, z₁ and z₂
-    #[cfg_attr(feature = "serde", serde(rename = "z₁", alias = "z1"))]
-    z1: f64,
-    #[cfg_attr(feature = "serde", serde(rename = "z₂", alias = "z2"))]
-    z2: f64,
+    /// Sum of the two ion charges, z₁ + z₂
+    charge_sum: f64,
 }
 
 impl<T: MultipoleEnergy> IonIonPolar<T> {
@@ -114,8 +111,7 @@ impl<T: MultipoleEnergy> IonIonPolar<T> {
         Self {
             ionion,
             alpha,
-            z1: charges.0,
-            z2: charges.1,
+            charge_sum: charges.0 + charges.1,
         }
     }
 }
@@ -131,21 +127,13 @@ impl<T: MultipoleEnergy + std::fmt::Debug + Clone + PartialEq + Send + Sync> Iso
             + self
                 .ionion
                 .scheme
-                .ion_induced_dipole_energy(self.z1, self.alpha, &r)
-            + self
-                .ionion
-                .scheme
-                .ion_induced_dipole_energy(self.z2, self.alpha, &-r)
+                .ion_induced_dipole_energy(self.charge_sum, self.alpha, &r)
     }
 }
 
 impl<T: MultipoleEnergy + Display> Display for IonIonPolar<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "IonIonPolar({}, {}, {}, {})",
-            self.ionion, self.alpha, self.z1, self.z2
-        )
+        write!(f, "IonIonPolar({}, {})", self.ionion, self.alpha)
     }
 }
 

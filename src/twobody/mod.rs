@@ -43,7 +43,7 @@ pub use harmonic::Harmonic;
 pub use lennard_jones::LennardJones;
 pub use mie::Mie;
 pub use morse::Morse;
-pub use multipole::{IonIon, IonIonPlain, IonIonYukawa, IonIonPolar};
+pub use multipole::{IonIon, IonIonPlain, IonIonPolar, IonIonYukawa};
 pub use ureybradley::UreyBradley;
 pub use wca::WeeksChandlerAndersen;
 
