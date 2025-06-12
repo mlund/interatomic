@@ -17,11 +17,14 @@
 //! This module provides tools for calculating the two-body interaction energy between
 //! electric multipole moments, such as monopoles, dipoles, quadrupoles etc.
 
-use crate::twobody::IsotropicTwobodyEnergy;
-use coulomb::{pairwise::MultipoleEnergy, permittivity::ConstantPermittivity};
+use crate::{twobody::IsotropicTwobodyEnergy, Vector3};
+use coulomb::{
+    pairwise::MultipoleEnergy,
+    permittivity::{ConstantPermittivity, RelativePermittivity},
+};
 #[cfg(feature = "serde")]
 use serde::Serialize;
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 
 /// Monopole-monopole interaction energy
 #[derive(Clone, PartialEq, Debug)]
@@ -55,7 +58,7 @@ impl<T: MultipoleEnergy> coulomb::DebyeLength for IonIon<T> {
     }
 }
 
-impl<T: MultipoleEnergy> coulomb::permittivity::RelativePermittivity for IonIon<T> {
+impl<T: MultipoleEnergy> RelativePermittivity for IonIon<T> {
     fn permittivity(&self, _temperature: f64) -> anyhow::Result<f64> {
         Ok(f64::from(self.permittivity))
     }
@@ -76,7 +79,7 @@ impl<T: MultipoleEnergy> IonIon<T> {
     }
 }
 
-impl<T: MultipoleEnergy + std::fmt::Debug + Clone + PartialEq + Send + Sync> IsotropicTwobodyEnergy
+impl<T: MultipoleEnergy + Debug + Clone + PartialEq + Send + Sync> IsotropicTwobodyEnergy
     for IonIon<T>
 {
     /// Calculate the isotropic twobody energy (kJ/mol)
@@ -101,8 +104,12 @@ pub struct IonIonPolar<T: MultipoleEnergy> {
     pub ionion: IonIon<T>,
     /// Common excess polarizability of the ion in Å³
     alpha: f64,
-    /// Sum of the two ion charges, z₁ + z₂
-    charge_sum: f64,
+    /// Charge of first particle, z₁
+    #[cfg_attr(feature = "serde", serde(rename = "z₁", alias = "z1"))]
+    z1: f64,
+    /// Charge of second particle, z₂
+    #[cfg_attr(feature = "serde", serde(rename = "z₂", alias = "z2"))]
+    z2: f64,
 }
 
 impl<T: MultipoleEnergy> IonIonPolar<T> {
@@ -111,23 +118,36 @@ impl<T: MultipoleEnergy> IonIonPolar<T> {
         Self {
             ionion,
             alpha,
-            charge_sum: charges.0 + charges.1,
+            z1: charges.0,
+            z2: charges.1,
         }
     }
 }
 
-impl<T: MultipoleEnergy + std::fmt::Debug + Clone + PartialEq + Send + Sync> IsotropicTwobodyEnergy
+impl<T: MultipoleEnergy + Debug + Clone + PartialEq + Send + Sync> IsotropicTwobodyEnergy
     for IonIonPolar<T>
 {
     /// Calculate the isotropic twobody energy (kJ/mol)
     fn isotropic_twobody_energy(&self, distance_squared: f64) -> f64 {
-        let ion_ion_energy = self.ionion.isotropic_twobody_energy(distance_squared);
-        let r = crate::Vector3::new(distance_squared.sqrt(), 0.0, 0.0);
-        ion_ion_energy
+        let r = distance_squared.sqrt();
+        let ion_ion_energy = self
+            .ionion
+            .scheme
+            .ion_ion_energy(self.ionion.charge_product, 1.0, r);
+
+        let r = Vector3::new(r, 0.0, 0.0);
+        // These terms are always <= 0
+        let ion_induced_dipole_energy = self
+            .ionion
+            .scheme
+            .ion_induced_dipole_energy(self.z1, self.alpha, &r)
             + self
                 .ionion
                 .scheme
-                .ion_induced_dipole_energy(self.charge_sum, self.alpha, &r)
+                .ion_induced_dipole_energy(self.z2, self.alpha, &-r);
+
+        coulomb::TO_CHEMISTRY_UNIT / f64::from(self.ionion.permittivity)
+            * (ion_ion_energy + ion_induced_dipole_energy)
     }
 }
 
