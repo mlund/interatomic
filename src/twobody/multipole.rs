@@ -94,6 +94,61 @@ pub type IonIonYukawa<'a> = IonIon<coulomb::pairwise::Yukawa>;
 /// Alias for ion-ion with a plain Coulomb potential that can be screened
 pub type IonIonPlain<'a> = IonIon<coulomb::pairwise::Plain>;
 
+/// Ion-ion interaction with added ion-induced dipole energy
+#[derive(Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+pub struct IonIonPolar<T: MultipoleEnergy> {
+    pub ionion: IonIon<T>,
+    /// Excess polarizability of the ion in Å³
+    alpha: f64,
+    /// Charges of the two ions, z₁ and z₂
+    #[cfg_attr(feature = "serde", serde(rename = "z₁", alias = "z1"))]
+    z1: f64,
+    #[cfg_attr(feature = "serde", serde(rename = "z₂", alias = "z2"))]
+    z2: f64,
+}
+
+impl<T: MultipoleEnergy> IonIonPolar<T> {
+    /// Create a new ion-ion interaction with polarizability
+    pub const fn new(ionion: IonIon<T>, alpha: f64, charges: (f64, f64)) -> Self {
+        Self {
+            ionion,
+            alpha,
+            z1: charges.0,
+            z2: charges.1,
+        }
+    }
+}
+
+impl<T: MultipoleEnergy + std::fmt::Debug + Clone + PartialEq + Send + Sync> IsotropicTwobodyEnergy
+    for IonIonPolar<T>
+{
+    /// Calculate the isotropic twobody energy (kJ/mol)
+    fn isotropic_twobody_energy(&self, distance_squared: f64) -> f64 {
+        let ion_ion_energy = self.ionion.isotropic_twobody_energy(distance_squared);
+        let r = crate::Vector3::new(distance_squared.sqrt(), 0.0, 0.0);
+        ion_ion_energy
+            + self
+                .ionion
+                .scheme
+                .ion_induced_dipole_energy(self.z1, self.alpha, &r)
+            + self
+                .ionion
+                .scheme
+                .ion_induced_dipole_energy(self.z2, self.alpha, &-r)
+    }
+}
+
+impl<T: MultipoleEnergy + Display> Display for IonIonPolar<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "IonIonPolar({}, {}, {}, {})",
+            self.ionion, self.alpha, self.z1, self.z2
+        )
+    }
+}
+
 // Test ion-ion energy
 #[cfg(test)]
 mod tests {
