@@ -102,24 +102,19 @@ pub type IonIonPlain<'a> = IonIon<coulomb::pairwise::Plain>;
 #[cfg_attr(feature = "serde", derive(Serialize))]
 pub struct IonIonPolar<T: MultipoleEnergy> {
     pub ionion: IonIon<T>,
-    /// Common excess polarizability of the ion in Å³
-    alpha: f64,
-    /// Charge of first particle, z₁
-    #[cfg_attr(feature = "serde", serde(rename = "z₁", alias = "z1"))]
-    z1: f64,
-    /// Charge of second particle, z₂
-    #[cfg_attr(feature = "serde", serde(rename = "z₂", alias = "z2"))]
-    z2: f64,
+    /// Charges of two particles
+    charges: (f64, f64),
+    /// Common excess polarizabilities of the ion in Å³
+    polarizabilities: (f64, f64),
 }
 
 impl<T: MultipoleEnergy> IonIonPolar<T> {
     /// Create a new ion-ion interaction with polarizability
-    pub const fn new(ionion: IonIon<T>, alpha: f64, charges: (f64, f64)) -> Self {
+    pub const fn new(ionion: IonIon<T>, charges: (f64, f64), polarizabilities: (f64, f64)) -> Self {
         Self {
             ionion,
-            alpha,
-            z1: charges.0,
-            z2: charges.1,
+            charges,
+            polarizabilities,
         }
     }
 }
@@ -128,32 +123,32 @@ impl<T: MultipoleEnergy + Debug + Clone + PartialEq + Send + Sync> IsotropicTwob
     for IonIonPolar<T>
 {
     /// Calculate the isotropic twobody energy (kJ/mol)
+    ///
     fn isotropic_twobody_energy(&self, distance_squared: f64) -> f64 {
         let r = distance_squared.sqrt();
-        let ion_ion_energy = self
-            .ionion
-            .scheme
-            .ion_ion_energy(self.ionion.charge_product, 1.0, r);
+        let scheme = &self.ionion.scheme;
+        let ion_ion = scheme.ion_ion_energy(self.ionion.charge_product, 1.0, r);
 
         let r = Vector3::new(r, 0.0, 0.0);
         // These terms are always <= 0
-        let ion_induced_dipole_energy = self
-            .ionion
-            .scheme
-            .ion_induced_dipole_energy(self.z1, self.alpha, &r)
-            + self
-                .ionion
-                .scheme
-                .ion_induced_dipole_energy(self.z2, self.alpha, &-r);
+        // TODO: This could be optimized by calling `ion_induced_dipole_energy` only once
+        // with e.g. alpha=1 and charge=`q1*a0 + q0*a1`.
+        let ion_induced_dipole =
+            scheme.ion_induced_dipole_energy(self.charges.0, self.polarizabilities.1, &r)
+                + scheme.ion_induced_dipole_energy(self.charges.1, self.polarizabilities.0, &-r);
 
         coulomb::TO_CHEMISTRY_UNIT / f64::from(self.ionion.permittivity)
-            * (ion_ion_energy + ion_induced_dipole_energy)
+            * (ion_ion + ion_induced_dipole)
     }
 }
 
 impl<T: MultipoleEnergy + Display> Display for IonIonPolar<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "IonIonPolar({}, {})", self.ionion, self.alpha)
+        write!(
+            f,
+            "IonIonPolar({}, {:?})",
+            self.ionion, self.polarizabilities
+        )
     }
 }
 
@@ -182,5 +177,17 @@ mod tests {
             screened_energy,
             unscreened_energy * (-r / debye_length).exp()
         );
+    }
+
+    fn test_ion_ion_polar() {
+        let permittivity = ConstantPermittivity::new(80.0);
+        let r: f64 = 7.0;
+        let cutoff = f64::INFINITY;
+        let scheme = Plain::new(cutoff, None);
+        let ionion = IonIon::new(1.0, permittivity, scheme);
+        let charges = (1.0, -1.0);
+        let polarizabilities = (10.0, 20.0); // Excess polarizability in Å³
+        let ionion_polar = IonIonPolar::new(ionion, charges, polarizabilities);
+        let energy = ionion_polar.isotropic_twobody_energy(r.powi(2));
     }
 }
