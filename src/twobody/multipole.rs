@@ -137,8 +137,8 @@ impl<T: MultipoleEnergy + Debug + Clone + PartialEq + Send + Sync> IsotropicTwob
             scheme.ion_induced_dipole_energy(self.charges.0, self.polarizabilities.1, &r)
                 + scheme.ion_induced_dipole_energy(self.charges.1, self.polarizabilities.0, &-r);
 
-        coulomb::TO_CHEMISTRY_UNIT / f64::from(self.ionion.permittivity)
-            * (ion_ion + ion_induced_dipole)
+        let to_kjmol = coulomb::TO_CHEMISTRY_UNIT / f64::from(self.ionion.permittivity);
+        to_kjmol * (ion_ion + ion_induced_dipole)
     }
 }
 
@@ -155,10 +155,12 @@ impl<T: MultipoleEnergy + Display> Display for IonIonPolar<T> {
 // Test ion-ion energy
 #[cfg(test)]
 mod tests {
+    use core::f64;
+
     use approx::assert_relative_eq;
 
     use super::*;
-    use coulomb::pairwise::Plain;
+    use coulomb::{pairwise::Plain, DebyeLength};
 
     #[test]
     fn test_ion_ion() {
@@ -178,16 +180,53 @@ mod tests {
             unscreened_energy * (-r / debye_length).exp()
         );
     }
-
+    #[test]
     fn test_ion_ion_polar() {
         let permittivity = ConstantPermittivity::new(80.0);
-        let r: f64 = 7.0;
-        let cutoff = f64::INFINITY;
-        let scheme = Plain::new(cutoff, None);
-        let ionion = IonIon::new(1.0, permittivity, scheme);
+        let r: f64 = 8.0;
         let charges = (1.0, -1.0);
-        let polarizabilities = (10.0, 20.0); // Excess polarizability in Å³
-        let ionion_polar = IonIonPolar::new(ionion, charges, polarizabilities);
+        let cutoff = f64::INFINITY;
+        let polarizabilities = (100.0, 80.0); // Excess polarizability in Å³
+
+        // No salt screening
+        let scheme = Plain::new(cutoff, None);
+        let ionion = IonIon::new(charges.0 * charges.1, permittivity, scheme);
+        let ionion_polar = IonIonPolar::new(ionion.clone(), charges, polarizabilities);
         let energy = ionion_polar.isotropic_twobody_energy(r.powi(2));
+        assert_relative_eq!(energy, -2.5524641571630236);
+
+        let induced_energy = energy - ionion.isotropic_twobody_energy(r.powi(2));
+        assert_relative_eq!(induced_energy, -0.38159763146955505);
+        assert_relative_eq!(
+            induced_energy,
+            -(100.0 + 80.0) * coulomb::TO_CHEMISTRY_UNIT
+                / (2.0 * f64::from(permittivity) * r.powi(4))
+        );
+
+        // With salt screening
+        let scheme = Plain::new(cutoff, Some(30.0));
+        let ionion = IonIon::new(charges.0 * charges.1, permittivity, scheme.clone());
+        let ionion_polar = IonIonPolar::new(ionion.clone(), charges, polarizabilities);
+        let energy = ionion_polar.isotropic_twobody_energy(r.powi(2));
+        assert_relative_eq!(energy, -2.021903629249571);
+
+        let induced_energy = energy - ionion.isotropic_twobody_energy(r.powi(2));
+        let kappa = 1.0 / scheme.debye_length().unwrap();
+        assert_relative_eq!(induced_energy, -0.3591754384137349);
+        assert_relative_eq!(
+            induced_energy,
+            -(polarizabilities.0 + polarizabilities.1) * coulomb::TO_CHEMISTRY_UNIT
+                / (2.0 * f64::from(permittivity))
+                * (f64::exp(-r * kappa) * (1.0 / r.powi(2) + kappa / r)).powi(2),
+            epsilon = 1e-7
+        );
+        assert_relative_eq!(
+            induced_energy,
+            -(polarizabilities.0 + polarizabilities.1) * coulomb::TO_CHEMISTRY_UNIT
+                / (2.0 * f64::from(permittivity))
+                * f64::exp(-2.0 * r * kappa)
+                * (1.0 / r.powi(2) + kappa / r).powi(2),
+            epsilon = 1e-7
+        );
     }
 }
