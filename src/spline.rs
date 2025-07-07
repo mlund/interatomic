@@ -18,7 +18,7 @@
 //!
 //! This is a conversion from Fortran → C++ → Rust 😱
 //! Serious refactoring is needed!
-use anyhow::Result;
+use anyhow::{bail, ensure, Result};
 use itertools::{Itertools, Position};
 use std::f64;
 use std::iter::zip;
@@ -88,7 +88,7 @@ impl Default for Spline {
 impl Spline {
     pub fn check_tolerance(&self) -> Result<(), anyhow::Error> {
         if self.derivative_tolerance != -1.0 && self.derivative_tolerance <= 0.0 {
-            return Err(anyhow::Error::msg("ftol too small"));
+            bail!("ftol too small");
         }
         Ok(())
     }
@@ -255,13 +255,15 @@ impl Andrea {
                 }
                 dx *= self.downscale_factor;
                 if let Position::Last(_) = attempt {
-                    return Err(anyhow::Error::msg("increase tolerance"));
+                    bail!("increase tolerance");
                 }
             }
 
-            if coeff.len() != 7 {
-                return Err(anyhow::Error::msg("invalid number of coefficients"));
-            }
+            ensure!(
+                coeff.len() == 7,
+                "invalid number of coefficients: expected 7, got {}",
+                coeff.len()
+            );
 
             knots.r2.push(lowx_squared);
             knots.coeff.extend(coeff.iter().skip(1));
@@ -274,7 +276,7 @@ impl Andrea {
                 break;
             }
             if let Position::Last(_) = attempt {
-                return Err(anyhow::Error::msg("increase tolerance"));
+                bail!("increase tolerance");
             }
         }
 
