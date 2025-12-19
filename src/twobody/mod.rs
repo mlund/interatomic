@@ -103,7 +103,7 @@ impl<T: IsotropicTwobodyEnergy> AnisotropicTwobodyEnergy for T {
 }
 
 /// Structure representing an interaction with always zero energy.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NoInteraction {}
 
 impl Default for NoInteraction {
@@ -132,7 +132,7 @@ impl IsotropicTwobodyEnergy for NoInteraction {
 /// For dynamic dispatch, `Box<dyn IsotropicTwobodyEnergy>`
 /// can be aggregated using the `+` operator.
 ///
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize))]
 pub struct Combined<T, U>(T, U);
 
@@ -165,14 +165,14 @@ impl IsotropicTwobodyEnergy for Arc<dyn IsotropicTwobodyEnergy> {
 }
 
 impl Add for Box<dyn IsotropicTwobodyEnergy> {
-    type Output = Box<dyn IsotropicTwobodyEnergy>;
-    fn add(self, other: Box<dyn IsotropicTwobodyEnergy>) -> Box<dyn IsotropicTwobodyEnergy> {
+    type Output = Self;
+    fn add(self, other: Self) -> Self {
         Box::new(Combined::new(self, other))
     }
 }
 
 impl Sum for Box<dyn IsotropicTwobodyEnergy> {
-    fn sum<I: Iterator<Item = Box<dyn IsotropicTwobodyEnergy>>>(iter: I) -> Self {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
         iter.fold(Box::new(NoInteraction {}), |acc, x| acc + x)
     }
 }

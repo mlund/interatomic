@@ -35,7 +35,7 @@ pub struct PeriodicDihedral {
 }
 
 impl PeriodicDihedral {
-    pub fn new(phase_angle: f64, spring_constant: f64, periodicity: f64) -> Self {
+    pub const fn new(phase_angle: f64, spring_constant: f64, periodicity: f64) -> Self {
         Self {
             phase_angle,
             spring_constant,

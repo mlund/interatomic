@@ -65,14 +65,14 @@ impl<const N: u32, const M: u32> Mie<N, M> {
 impl<const N: u32, const M: u32> IsotropicTwobodyEnergy for Mie<N, M> {
     #[inline]
     fn isotropic_twobody_energy(&self, distance_squared: f64) -> f64 {
-        if Mie::<N, M>::OPTIMIZE {
-            let mth_power = (self.sigma * self.sigma / distance_squared).powi(Mie::<N, M>::M_HALF); // (σ/r)^m
-            return Mie::<N, M>::C
+        if Self::OPTIMIZE {
+            let mth_power = (self.sigma * self.sigma / distance_squared).powi(Self::M_HALF); // (σ/r)^m
+            return Self::C
                 * self.epsilon
-                * (mth_power.powi(Mie::<N, M>::N_OVER_M) - mth_power);
+                * (mth_power.powi(Self::N_OVER_M) - mth_power);
         }
         let s_over_r = self.sigma / distance_squared.sqrt(); // (σ/r)
-        Mie::<N, M>::C * self.epsilon * (s_over_r.powi(N as i32) - s_over_r.powi(M as i32))
+        Self::C * self.epsilon * (s_over_r.powi(N as i32) - s_over_r.powi(M as i32))
     }
 }
 

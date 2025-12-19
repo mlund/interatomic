@@ -62,7 +62,7 @@ impl WeeksChandlerAndersen {
 impl Cutoff for WeeksChandlerAndersen {
     #[inline(always)]
     fn cutoff_squared(&self) -> f64 {
-        self.lennard_jones.sigma_squared * WeeksChandlerAndersen::TWOTOTWOSIXTH
+        self.lennard_jones.sigma_squared * Self::TWOTOTWOSIXTH
     }
     #[inline(always)]
     fn cutoff(&self) -> f64 {
@@ -84,6 +84,6 @@ impl IsotropicTwobodyEnergy for WeeksChandlerAndersen {
             return 0.0;
         }
         let x6 = (self.lennard_jones.sigma_squared / distance_squared).powi(3); // (σ/r)^6
-        self.lennard_jones.four_times_epsilon * (x6 * x6 - x6 + WeeksChandlerAndersen::ONEFOURTH)
+        self.lennard_jones.four_times_epsilon * (x6 * x6 - x6 + Self::ONEFOURTH)
     }
 }

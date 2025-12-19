@@ -52,11 +52,11 @@ pub struct Knots {
 }
 
 impl Knots {
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.r2.is_empty() && self.coeff.is_empty()
     }
 
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.r2.len()
     }
 }
@@ -94,12 +94,12 @@ impl Spline {
     }
 
     /// Set the tolerance for the spline values and the derivative of the spline values
-    pub fn set_tolerance(&mut self, utol: f64, ftol: f64) {
+    pub const fn set_tolerance(&mut self, utol: f64, ftol: f64) {
         self.tolerance = utol;
         self.derivative_tolerance = ftol;
     }
 
-    pub fn set_differentiation_step_size(&mut self, step_size: f64) {
+    pub const fn set_differentiation_step_size(&mut self, step_size: f64) {
         self.diff_step_size = step_size;
     }
 }
@@ -245,7 +245,7 @@ impl Andrea {
 
                 let low_diff = derivatives(func, lowx_squared, self.spline.diff_step_size);
                 let upp_diff = derivatives(func, highx_squared, self.spline.diff_step_size);
-                coeff = Andrea::get_coefficients(lowx_squared, highx_squared, low_diff, upp_diff);
+                coeff = Self::get_coefficients(lowx_squared, highx_squared, low_diff, upp_diff);
 
                 let error_codes = self.check_coefficients(&coeff, lowx, highx, func);
                 high_repulsion = error_codes.1;
