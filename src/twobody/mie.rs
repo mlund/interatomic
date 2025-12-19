@@ -51,7 +51,7 @@ impl<const N: u32, const M: u32> Mie<N, M> {
     const C: f64 = (N / (N - M) * (N / M).pow(M / (N - M))) as f64;
 
     /// Compile-time optimization if N and M are divisible by 2
-    const OPTIMIZE: bool = (N % 2 == 0) && (M % 2 == 0);
+    const OPTIMIZE: bool = N.is_multiple_of(2) && M.is_multiple_of(2);
     const N_OVER_M: i32 = (N / M) as i32;
     const M_HALF: i32 = (M / 2) as i32;
 
