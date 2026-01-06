@@ -25,6 +25,11 @@ dyn-clone = "1.0.17"
 
 [dev-dependencies]
 approx = "0.5"
+criterion = "0.5"
+
+[[bench]]
+name = "twobody"
+harness = false
 
 # See https://github.com/victe/rust-latex-doc-minimal-example
 # for including math in the documentation

@@ -83,12 +83,6 @@ impl KimHummer {
     pub fn r0(&self) -> f64 {
         f64::powf(2.0, 1.0 / 6.0) * self.sigma
     }
-
-    /// Returns r₀² = 2^(1/3) * σ²
-    #[inline(always)]
-    fn r0_squared(&self) -> f64 {
-        Self::TWO_TO_TWO_SIXTH * self.sigma * self.sigma
-    }
 }
 
 impl IsotropicTwobodyEnergy for KimHummer {
@@ -103,7 +97,7 @@ impl IsotropicTwobodyEnergy for KimHummer {
             4.0 * self.epsilon.abs() * (sr12 - sr6)
         } else if self.epsilon > 0.0 {
             // Repulsive: two branches
-            let r0_squared = self.r0_squared();
+            let r0_squared = Self::TWO_TO_TWO_SIXTH * sigma_squared;
             if distance_squared < r0_squared {
                 // Inner branch: standard LJ shifted up by 2ε
                 4.0 * self.epsilon * (sr12 - sr6) + 2.0 * self.epsilon
