@@ -212,6 +212,8 @@ fn bench_twobody_batch(c: &mut Criterion) {
 
 /// Spline single evaluation benchmarks
 fn bench_spline_single(c: &mut Criterion) {
+    use wide::f64x4;
+
     let mut group = c.benchmark_group("spline_single");
 
     let sigma: f64 = 6.0;
@@ -219,34 +221,30 @@ fn bench_spline_single(c: &mut Criterion) {
     let cutoff: f64 = 15.0; // ~2.5σ
     let r_squared = (1.2 * sigma).powi(2);
 
-    // Analytical LJ for comparison
+    // Ashbaugh-Hatch + Yukawa
     let lj = LennardJones::new(epsilon, sigma);
-    group.bench_function("LJ_analytical", |b| {
-        b.iter(|| lj.isotropic_twobody_energy(black_box(r_squared)))
-    });
-
-    // Ashbaugh-Hatch + Yukawa (more expensive)
-    let ah = AshbaughHatch::new(lj.clone(), 0.5, cutoff); // lambda=0.5 for intermediate hydrophobicity
+    let ah = AshbaughHatch::new(lj, 0.5, cutoff); // lambda=0.5 for intermediate hydrophobicity
     let ahy = AshbaughHatchYukawa::new(ah, 10.0, 0.5);
     group.bench_function("AH_Yukawa_analytical", |b| {
         b.iter(|| ahy.isotropic_twobody_energy(black_box(r_squared)))
     });
 
-    // Splined LJ
+    // Splined AH+Yukawa (scalar)
     let config = SplineConfig {
         n_points: 2000,
         rsq_min: Some((0.8 * sigma).powi(2)),
         ..Default::default()
     };
-    let splined_lj = SplinedPotential::with_cutoff(&lj, cutoff, config.clone());
-    group.bench_function("LJ_splined", |b| {
-        b.iter(|| splined_lj.isotropic_twobody_energy(black_box(r_squared)))
-    });
-
-    // Splined AH+Yukawa
     let splined_ahy = SplinedPotential::with_cutoff(&ahy, cutoff, config);
     group.bench_function("AH_Yukawa_splined", |b| {
         b.iter(|| splined_ahy.isotropic_twobody_energy(black_box(r_squared)))
+    });
+
+    // Splined AH+Yukawa (SIMD x4)
+    let simd_table = splined_ahy.to_simd();
+    let rsq_x4 = f64x4::splat(r_squared);
+    group.bench_function("AH_Yukawa_splined_simd_x4", |b| {
+        b.iter(|| simd_table.energy_x4(black_box(rsq_x4)))
     });
 
     group.finish();
@@ -270,25 +268,10 @@ fn bench_spline_batch(c: &mut Criterion) {
         })
         .collect();
 
-    // ========== Pure LJ comparison ==========
-
-    let lj = LennardJones::new(epsilon, sigma);
-    group.bench_with_input(
-        BenchmarkId::new("LJ_analytical", n_pairs),
-        &distances,
-        |b, dists| {
-            b.iter(|| {
-                dists
-                    .iter()
-                    .map(|&r2| lj.isotropic_twobody_energy(r2))
-                    .sum::<f64>()
-            })
-        },
-    );
-
     // ========== Ashbaugh-Hatch + Yukawa (expensive) ==========
 
-    let ah = AshbaughHatch::new(lj.clone(), 0.5, cutoff);
+    let lj = LennardJones::new(epsilon, sigma);
+    let ah = AshbaughHatch::new(lj, 0.5, cutoff);
     let ahy = AshbaughHatchYukawa::new(ah, 10.0, 0.5);
     group.bench_with_input(
         BenchmarkId::new("AH_Yukawa_analytical", n_pairs),
