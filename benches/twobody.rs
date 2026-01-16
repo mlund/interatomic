@@ -315,9 +315,7 @@ fn bench_spline_batch(c: &mut Criterion) {
     group.bench_with_input(
         BenchmarkId::new("AH_Yukawa_splined_simd", n_pairs),
         &distances,
-        |b, dists| {
-            b.iter(|| simd_table.sum_energies_simd(dists))
-        },
+        |b, dists| b.iter(|| simd_table.sum_energies_simd(dists)),
     );
 
     // ========== Splined with batch output ==========

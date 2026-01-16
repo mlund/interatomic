@@ -189,6 +189,10 @@ pub struct SplinedPotential {
 }
 
 impl SplinedPotential {
+    pub fn coefficients(&self) -> &[SplineCoeffs] {
+        &self.coeffs
+    }
+
     /// Create a new splined potential from an analytical potential with a Cutoff.
     ///
     /// # Arguments
@@ -230,11 +234,7 @@ impl SplinedPotential {
     }
 
     /// Internal builder that does the actual work.
-    fn build<P: IsotropicTwobodyEnergy>(
-        potential: &P,
-        cutoff: f64,
-        config: SplineConfig,
-    ) -> Self {
+    fn build<P: IsotropicTwobodyEnergy>(potential: &P, cutoff: f64, config: SplineConfig) -> Self {
         let n = config.n_points;
         assert!(n >= 4, "Need at least 4 grid points");
 
@@ -346,7 +346,8 @@ impl SplinedPotential {
 
         // Compute cubic Hermite spline coefficients
         // For UniformR, we pass delta_rsq as variable spacing (computed per interval)
-        let coeffs = Self::compute_cubic_hermite_coeffs(&rsq_vals, &u_vals, &f_vals, config.grid_type);
+        let coeffs =
+            Self::compute_cubic_hermite_coeffs(&rsq_vals, &u_vals, &f_vals, config.grid_type);
 
         Self {
             coeffs,
@@ -401,7 +402,11 @@ impl SplinedPotential {
 
                     // dU/d(rsq) = dU/dr · dr/d(rsq) = -F(r) / (2r)
                     let duds_i = if r_i > 1e-10 { -f_i / (2.0 * r_i) } else { 0.0 };
-                    let duds_i1 = if r_i1 > 1e-10 { -f_i1 / (2.0 * r_i1) } else { 0.0 };
+                    let duds_i1 = if r_i1 > 1e-10 {
+                        -f_i1 / (2.0 * r_i1)
+                    } else {
+                        0.0
+                    };
 
                     let a0 = u_i;
                     let a1 = delta_rsq * duds_i;
@@ -780,7 +785,11 @@ impl SplinedPotential {
     pub fn evaluate_batch(&self, rsq_values: &[f64], energies: &mut [f64], forces: &mut [f64]) {
         debug_assert_eq!(rsq_values.len(), energies.len());
         debug_assert_eq!(rsq_values.len(), forces.len());
-        for ((rsq, u), f) in rsq_values.iter().zip(energies.iter_mut()).zip(forces.iter_mut()) {
+        for ((rsq, u), f) in rsq_values
+            .iter()
+            .zip(energies.iter_mut())
+            .zip(forces.iter_mut())
+        {
             *u = self.isotropic_twobody_energy(*rsq);
             *f = self.isotropic_twobody_force(*rsq);
         }
@@ -1055,8 +1064,14 @@ impl SplineTableSimd {
 
     /// Get memory usage in bytes.
     pub fn memory_bytes(&self) -> usize {
-        8 * (self.u0.len() + self.u1.len() + self.u2.len() + self.u3.len()
-            + self.f0.len() + self.f1.len() + self.f2.len() + self.f3.len())
+        8 * (self.u0.len()
+            + self.u1.len()
+            + self.u2.len()
+            + self.u3.len()
+            + self.f0.len()
+            + self.f1.len()
+            + self.f2.len()
+            + self.f3.len())
     }
 }
 
@@ -1189,7 +1204,10 @@ mod tests {
         println!("r_min: {:.4} Å", stats.r_min);
         println!("r_max: {:.4} Å", stats.r_max);
         println!("grid_type: {:?}", stats.grid_type);
-        println!("delta: {:.6} (Δr for UniformR, Δr² for UniformRsq)", stats.delta);
+        println!(
+            "delta: {:.6} (Δr for UniformR, Δr² for UniformRsq)",
+            stats.delta
+        );
         println!("memory_bytes: {}", stats.memory_bytes);
         println!("energy_shift: {:.6e}", stats.energy_shift);
 
@@ -1206,7 +1224,10 @@ mod tests {
                 println!("Grid type: UniformRsq (constant Δr² = {:.4})", delta);
                 println!("delta_r at r=0.1 Å: {:.4} Å", ((0.01 + delta).sqrt() - 0.1));
                 println!("delta_r at r=1.0 Å: {:.4} Å", ((1.0 + delta).sqrt() - 1.0));
-                println!("delta_r at r=10 Å: {:.4} Å", ((100.0 + delta).sqrt() - 10.0));
+                println!(
+                    "delta_r at r=10 Å: {:.4} Å",
+                    ((100.0 + delta).sqrt() - 10.0)
+                );
             }
             GridType::PowerLaw(p) => {
                 println!("Grid type: PowerLaw (p = {:.1})", p);
@@ -1220,10 +1241,7 @@ mod tests {
             let r_i = r_min_val + i as f64 * delta;
             let rsq_i = r_i * r_i;
             let u_i = combined.isotropic_twobody_energy(rsq_i);
-            println!(
-                "  i={}: r={:.4} Å, rsq={:.4}, u={:.6e}",
-                i, r_i, rsq_i, u_i
-            );
+            println!("  i={}: r={:.4} Å, rsq={:.4}, u={:.6e}", i, r_i, rsq_i, u_i);
         }
 
         // Examine interpolation at r=0.5 Å
@@ -1233,7 +1251,10 @@ mod tests {
         let t = (r_test - r_min_val) / delta;
         let i = t as usize;
         let eps = t - i as f64;
-        println!("t = (r - r_min) / delta = ({} - {}) / {} = {}", r_test, r_min_val, delta, t);
+        println!(
+            "t = (r - r_min) / delta = ({} - {}) / {} = {}",
+            r_test, r_min_val, delta, t
+        );
         println!("interval index i = {}", i);
         println!("fractional part eps = {:.6}", eps);
 
@@ -1255,7 +1276,7 @@ mod tests {
         println!("  u ratio: {:.2e}", u_lo / u_hi);
 
         // Compute derivatives for Hermite (in r-space for UniformR)
-        let dudr_lo = -f_lo;  // dU/dr = -F
+        let dudr_lo = -f_lo; // dU/dr = -F
         let dudr_hi = -f_hi;
         println!("\nDerivatives dU/dr:");
         println!("  at r_lo: {:.6e}", dudr_lo);
@@ -1276,7 +1297,10 @@ mod tests {
         let u_interp = a0 + eps * (a1 + eps * (a2 + eps * a3));
         println!("\nPolynomial evaluation at eps={:.6}:", eps);
         println!("  u_interp = {:.6e}", u_interp);
-        println!("  u_exact  = {:.6e}", combined.isotropic_twobody_energy(rsq_test));
+        println!(
+            "  u_exact  = {:.6e}",
+            combined.isotropic_twobody_energy(rsq_test)
+        );
     }
 
     /// Test PowerLaw grid with p=2 for AshbaughHatch + Yukawa.
