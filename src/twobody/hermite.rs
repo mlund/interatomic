@@ -70,19 +70,24 @@ impl Debug for SplineCoeffs {
 ///
 /// The choice of grid type significantly affects accuracy for potentials
 /// with steep repulsive cores (like Lennard-Jones).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GridType {
     /// Uniform spacing in r² (legacy behavior).
     /// Gives sparser sampling at short range — poor for steep potentials.
     UniformRsq,
     /// Uniform spacing in r.
     /// Gives equal sampling density everywhere.
-    #[default]
     UniformR,
     /// Power-law mapping: r(x) = r_min + (r_max - r_min) * x^p where x ∈ [0,1] is uniform.
     /// For p > 1, gives denser sampling at short range (recommended for steep potentials).
-    /// Typical values: p = 2 or 3.
+    /// Default is p = 2.0.
     PowerLaw(f64),
+}
+
+impl Default for GridType {
+    fn default() -> Self {
+        GridType::PowerLaw(2.0)
+    }
 }
 
 /// Configuration for spline table construction
@@ -99,7 +104,7 @@ pub struct SplineConfig {
     /// Apply shift-force correction (default: false)
     /// When true, both U(rc) = 0 and F(rc) = 0
     pub shift_force: bool,
-    /// Grid spacing strategy (default: UniformR)
+    /// Grid spacing strategy (default: PowerLaw(2.0))
     pub grid_type: GridType,
 }
 
@@ -158,9 +163,10 @@ impl SplineConfig {
 
 /// A splined version of any isotropic twobody potential.
 ///
-/// Provides O(1) evaluation via cubic spline interpolation. Supports two grid types:
-/// - `UniformR`: Uniform spacing in r (recommended for steep potentials)
-/// - `UniformRsq`: Uniform spacing in r² (legacy, faster but less accurate at short range)
+/// Provides O(1) evaluation via cubic spline interpolation. Supports three grid types:
+/// - `PowerLaw(p)`: Power-law spacing with denser sampling at short range (default, p=2.0)
+/// - `UniformR`: Uniform spacing in r
+/// - `UniformRsq`: Uniform spacing in r² (legacy, not recommended)
 ///
 /// The splined potential is type-erased after construction—it stores only the
 /// precomputed coefficients, not the original potential.
@@ -1502,5 +1508,149 @@ mod tests {
                 out_scalar[i]
             );
         }
+    }
+
+    /// Test that spline maintains positive energies at short range (no sign reversal).
+    ///
+    /// Sign reversal in the repulsive region is catastrophic for MD simulations
+    /// as it creates artificial attractive wells that cause particle collapse.
+    #[test]
+    fn test_no_sign_reversal_short_range_lj() {
+        let lj = LennardJones::new(1.0, 1.0);
+        let cutoff = 2.5;
+        let rsq_min = 0.01; // r_min = 0.1 σ
+
+        let splined = SplinedPotential::with_cutoff(
+            &lj,
+            cutoff,
+            SplineConfig::default().with_rsq_min(rsq_min),
+        );
+
+        // Scan from r=0.1 to r=0.5 σ with fine resolution
+        // This is the steep repulsive region where sign reversal could occur
+        for i in 0..4000 {
+            let r = 0.1 + (i as f64) * 0.0001; // 0.1 to 0.5 σ
+            let rsq = r * r;
+            if rsq < rsq_min {
+                continue;
+            }
+
+            let u_exact = lj.isotropic_twobody_energy(rsq);
+            let u_spline = splined.isotropic_twobody_energy(rsq);
+
+            // If exact potential is positive (repulsive), spline must also be positive
+            if u_exact > 0.0 {
+                assert!(
+                    u_spline > 0.0,
+                    "Sign reversal at r={:.4} σ: exact={:.3e} (positive), spline={:.3e} (negative)",
+                    r,
+                    u_exact,
+                    u_spline
+                );
+            }
+        }
+    }
+
+    /// Test no sign reversal for AshbaughHatch + Yukawa at short range.
+    #[test]
+    fn test_no_sign_reversal_short_range_ah_yukawa() {
+        let lj = LennardJones::new(0.8, 3.0);
+        let ah = AshbaughHatch::new(lj, 0.5, 100.0);
+        let yukawa = IonIon::new(
+            1.0,
+            ConstantPermittivity::new(80.0),
+            Yukawa::new(100.0, Some(50.0)),
+        );
+        let combined = Combined::new(ah, yukawa);
+
+        let rsq_min = 0.01; // r_min = 0.1 Å
+        let splined = SplinedPotential::with_cutoff(
+            &combined,
+            100.0,
+            SplineConfig::default().with_rsq_min(rsq_min),
+        );
+
+        // Scan from r=0.1 to r=1.0 Å
+        for i in 0..9000 {
+            let r = 0.1 + (i as f64) * 0.0001;
+            let rsq = r * r;
+            if rsq < rsq_min {
+                continue;
+            }
+
+            let u_exact = combined.isotropic_twobody_energy(rsq);
+            let u_spline = splined.isotropic_twobody_energy(rsq);
+
+            if u_exact > 0.0 {
+                assert!(
+                    u_spline > 0.0,
+                    "Sign reversal at r={:.4} Å: exact={:.3e}, spline={:.3e}",
+                    r,
+                    u_exact,
+                    u_spline
+                );
+            }
+        }
+    }
+
+    /// Test that UniformR grid produces sign reversals (regression test).
+    ///
+    /// This documents the known issue with UniformR at short range and ensures
+    /// the default PowerLaw grid is used to avoid it.
+    #[test]
+    fn test_uniform_r_has_sign_reversal() {
+        // Use AH+Yukawa with large cutoff - this is where UniformR fails
+        let lj = LennardJones::new(0.8, 3.0);
+        let ah = AshbaughHatch::new(lj, 0.5, 100.0);
+        let yukawa = IonIon::new(
+            1.0,
+            ConstantPermittivity::new(80.0),
+            Yukawa::new(100.0, Some(50.0)),
+        );
+        let combined = Combined::new(ah, yukawa);
+
+        let rsq_min = 0.01;
+        let splined = SplinedPotential::with_cutoff(
+            &combined,
+            100.0,
+            SplineConfig::high_accuracy()
+                .with_rsq_min(rsq_min)
+                .with_grid_type(GridType::UniformR),
+        );
+
+        // Count negative values where exact is positive
+        let mut sign_reversals = 0;
+        for i in 0..9000 {
+            let r = 0.1 + (i as f64) * 0.0001;
+            let rsq = r * r;
+            if rsq < rsq_min {
+                continue;
+            }
+
+            let u_exact = combined.isotropic_twobody_energy(rsq);
+            let u_spline = splined.isotropic_twobody_energy(rsq);
+
+            if u_exact > 0.0 && u_spline < 0.0 {
+                sign_reversals += 1;
+            }
+        }
+
+        // UniformR should have sign reversals (this is why PowerLaw is the default)
+        assert!(
+            sign_reversals > 0,
+            "Expected UniformR to have sign reversals at short range, found none. \
+             If this test fails, UniformR may have been fixed and this test can be updated."
+        );
+    }
+
+    /// Test that default GridType is PowerLaw(2.0).
+    #[test]
+    fn test_default_grid_type_is_powerlaw() {
+        let default = GridType::default();
+        assert_eq!(
+            default,
+            GridType::PowerLaw(2.0),
+            "Default GridType should be PowerLaw(2.0) to prevent sign reversals"
+        );
     }
 }
