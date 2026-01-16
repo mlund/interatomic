@@ -66,6 +66,21 @@ impl Debug for SplineCoeffs {
     }
 }
 
+/// Grid spacing strategy for spline construction.
+///
+/// The choice of grid type significantly affects accuracy for potentials
+/// with steep repulsive cores (like Lennard-Jones).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum GridType {
+    /// Uniform spacing in r² (legacy behavior).
+    /// Gives sparser sampling at short range — poor for steep potentials.
+    UniformRsq,
+    /// Uniform spacing in r (recommended for most potentials).
+    /// Gives denser sampling at short range where potentials change rapidly.
+    #[default]
+    UniformR,
+}
+
 /// Configuration for spline table construction
 #[derive(Clone, Debug)]
 pub struct SplineConfig {
@@ -80,6 +95,8 @@ pub struct SplineConfig {
     /// Apply shift-force correction (default: false)
     /// When true, both U(rc) = 0 and F(rc) = 0
     pub shift_force: bool,
+    /// Grid spacing strategy (default: UniformR)
+    pub grid_type: GridType,
 }
 
 impl Default for SplineConfig {
@@ -90,6 +107,7 @@ impl Default for SplineConfig {
             rsq_max: None,
             shift_energy: true,
             shift_force: false,
+            grid_type: GridType::default(),
         }
     }
 }
@@ -122,6 +140,12 @@ impl SplineConfig {
         self.rsq_max = Some(rsq_max);
         self
     }
+
+    /// Set grid type (UniformR recommended for steep potentials)
+    pub fn with_grid_type(mut self, grid_type: GridType) -> Self {
+        self.grid_type = grid_type;
+        self
+    }
 }
 
 // ============================================================================
@@ -130,26 +154,26 @@ impl SplineConfig {
 
 /// A splined version of any isotropic twobody potential.
 ///
-/// Provides O(1) evaluation via cubic spline interpolation on a uniform grid in r².
+/// Provides O(1) evaluation via cubic spline interpolation. Supports two grid types:
+/// - `UniformR`: Uniform spacing in r (recommended for steep potentials)
+/// - `UniformRsq`: Uniform spacing in r² (legacy, faster but less accurate at short range)
+///
 /// The splined potential is type-erased after construction—it stores only the
 /// precomputed coefficients, not the original potential.
-///
-/// The grid in r² (rather than r) is deliberate:
-/// 1. `IsotropicTwobodyEnergy` already takes r² as input
-/// 2. Uniform spacing in r² gives denser sampling at short range
-/// 3. No sqrt needed anywhere in the evaluation path
 #[derive(Clone)]
 pub struct SplinedPotential {
     /// Spline coefficients for each grid interval
     coeffs: Vec<SplineCoeffs>,
-    /// Minimum r² (grid start)
-    rsq_min: f64,
-    /// Maximum r² (cutoff²)
-    rsq_max: f64,
-    /// Grid spacing Δ(r²)
-    delta_rsq: f64,
+    /// Grid type used for construction
+    grid_type: GridType,
+    /// Minimum r (grid start)
+    r_min: f64,
+    /// Maximum r (cutoff)
+    r_max: f64,
+    /// Grid spacing Δr (for UniformR) or Δ(r²) (for UniformRsq)
+    delta: f64,
     /// Inverse grid spacing (precomputed)
-    inv_delta_rsq: f64,
+    inv_delta: f64,
     /// Number of grid points
     n: usize,
     /// Energy shift applied at cutoff
@@ -215,8 +239,8 @@ impl SplinedPotential {
 
         assert!(rsq_min < rsq_max, "rsq_min must be less than rsq_max");
 
-        let delta_rsq = (rsq_max - rsq_min) / (n - 1) as f64;
-        let inv_delta_rsq = 1.0 / delta_rsq;
+        let r_min = rsq_min.sqrt();
+        let r_max = rsq_max.sqrt();
 
         // Calculate shifts at cutoff
         let energy_shift = if config.shift_energy || config.shift_force {
@@ -231,40 +255,73 @@ impl SplinedPotential {
             0.0
         };
 
-        // Sample potential at grid points
-        let mut rsq_vals = Vec::with_capacity(n);
-        let mut u_vals = Vec::with_capacity(n);
-        let mut f_vals = Vec::with_capacity(n);
+        // Build grid based on grid type
+        let (delta, rsq_vals, u_vals, f_vals) = match config.grid_type {
+            GridType::UniformRsq => {
+                // Legacy: uniform in r² space
+                let delta_rsq = (rsq_max - rsq_min) / (n - 1) as f64;
+                let mut rsq_vals = Vec::with_capacity(n);
+                let mut u_vals = Vec::with_capacity(n);
+                let mut f_vals = Vec::with_capacity(n);
 
-        for i in 0..n {
-            let rsq = rsq_min + i as f64 * delta_rsq;
-            rsq_vals.push(rsq);
+                for i in 0..n {
+                    let rsq = rsq_min + i as f64 * delta_rsq;
+                    rsq_vals.push(rsq);
 
-            let mut u = potential.isotropic_twobody_energy(rsq) - energy_shift;
-            let mut f = potential.isotropic_twobody_force(rsq);
+                    let mut u = potential.isotropic_twobody_energy(rsq) - energy_shift;
+                    let mut f = potential.isotropic_twobody_force(rsq);
 
-            // Shift-force correction: U_sf = U - U(rc) - (r - rc) * F(rc)
-            // In r² coordinates: U_sf = U - U(rc) - (sqrt(rsq) - sqrt(rsq_max)) * F(rc)
-            if config.shift_force {
-                let r = rsq.sqrt();
-                let rc = rsq_max.sqrt();
-                u -= (r - rc) * force_shift;
-                f -= force_shift;
+                    if config.shift_force {
+                        let r = rsq.sqrt();
+                        u -= (r - r_max) * force_shift;
+                        f -= force_shift;
+                    }
+
+                    u_vals.push(u);
+                    f_vals.push(f);
+                }
+                (delta_rsq, rsq_vals, u_vals, f_vals)
             }
+            GridType::UniformR => {
+                // Recommended: uniform in r space (denser at short range in r² space)
+                let delta_r = (r_max - r_min) / (n - 1) as f64;
+                let mut rsq_vals = Vec::with_capacity(n);
+                let mut u_vals = Vec::with_capacity(n);
+                let mut f_vals = Vec::with_capacity(n);
 
-            u_vals.push(u);
-            f_vals.push(f);
-        }
+                for i in 0..n {
+                    let r = r_min + i as f64 * delta_r;
+                    let rsq = r * r;
+                    rsq_vals.push(rsq);
+
+                    let mut u = potential.isotropic_twobody_energy(rsq) - energy_shift;
+                    let mut f = potential.isotropic_twobody_force(rsq);
+
+                    if config.shift_force {
+                        u -= (r - r_max) * force_shift;
+                        f -= force_shift;
+                    }
+
+                    u_vals.push(u);
+                    f_vals.push(f);
+                }
+                (delta_r, rsq_vals, u_vals, f_vals)
+            }
+        };
+
+        let inv_delta = 1.0 / delta;
 
         // Compute cubic Hermite spline coefficients
-        let coeffs = Self::compute_cubic_hermite_coeffs(&rsq_vals, &u_vals, &f_vals, delta_rsq);
+        // For UniformR, we pass delta_rsq as variable spacing (computed per interval)
+        let coeffs = Self::compute_cubic_hermite_coeffs(&rsq_vals, &u_vals, &f_vals, config.grid_type);
 
         Self {
             coeffs,
-            rsq_min,
-            rsq_max,
-            delta_rsq,
-            inv_delta_rsq,
+            grid_type: config.grid_type,
+            r_min,
+            r_max,
+            delta,
+            inv_delta,
             n,
             energy_shift,
             force_shift,
@@ -274,75 +331,104 @@ impl SplinedPotential {
 
     /// Compute cubic Hermite spline coefficients.
     ///
-    /// For each interval [rsq_i, rsq_{i+1}], we fit a cubic polynomial:
+    /// For each interval, we fit a cubic polynomial:
     /// ```text
     /// V(ε) = A₀ + A₁ε + A₂ε² + A₃ε³
     /// ```
-    /// where ε = (rsq - rsq_i) / Δrsq ∈ [0, 1)
+    /// where ε ∈ [0, 1) is the fractional position within the interval.
     ///
-    /// The coefficients are determined by matching:
-    /// - V(0) = u_i
-    /// - V(1) = u_{i+1}
-    /// - V'(0) = Δrsq · (du/d(rsq))_i
-    /// - V'(1) = Δrsq · (du/d(rsq))_{i+1}
+    /// For UniformRsq: ε = (rsq - rsq_i) / Δrsq
+    /// For UniformR: ε = (r - r_i) / Δr
     fn compute_cubic_hermite_coeffs(
         rsq: &[f64],
         u: &[f64],
         f: &[f64],
-        delta_rsq: f64,
+        grid_type: GridType,
     ) -> Vec<SplineCoeffs> {
         let n = rsq.len();
         let mut coeffs = Vec::with_capacity(n);
 
         for i in 0..n.saturating_sub(1) {
+            let r_i = rsq[i].sqrt();
+            let r_i1 = rsq[i + 1].sqrt();
+            let delta_r = r_i1 - r_i;
+
             // Energy values at interval endpoints
             let u_i = u[i];
             let u_i1 = u[i + 1];
 
-            // The force from IsotropicTwobodyEnergy is F(r) = -dU/dr
-            // We need dU/d(rsq) for the spline in rsq-space:
-            // dU/d(rsq) = dU/dr · dr/d(rsq) = -F(r) · 1/(2r) = -F(r) / (2·sqrt(rsq))
-            let r_i = rsq[i].sqrt();
-            let r_i1 = rsq[i + 1].sqrt();
-
-            let duds_i = if r_i > 1e-10 {
-                -f[i] / (2.0 * r_i)
-            } else {
-                0.0
-            };
-            let duds_i1 = if r_i1 > 1e-10 {
-                -f[i + 1] / (2.0 * r_i1)
-            } else {
-                0.0
-            };
-
-            // Cubic Hermite coefficients for energy
-            let a0 = u_i;
-            let a1 = delta_rsq * duds_i;
-            let a2 = 3.0 * (u_i1 - u_i) - delta_rsq * (2.0 * duds_i + duds_i1);
-            let a3 = 2.0 * (u_i - u_i1) + delta_rsq * (duds_i + duds_i1);
-
-            // For force, fit a separate cubic to the force values
-            // This gives better accuracy than differentiating the energy spline
+            // Force values (F = -dU/dr)
             let f_i = f[i];
             let f_i1 = f[i + 1];
 
-            // Estimate df/d(rsq) using finite differences
-            let dfds_i = if i > 0 {
-                (f[i + 1] - f[i.saturating_sub(1)]) / (2.0 * delta_rsq)
-            } else {
-                (f[i + 1] - f[i]) / delta_rsq
-            };
-            let dfds_i1 = if i + 2 < n {
-                (f[i + 2] - f[i]) / (2.0 * delta_rsq)
-            } else {
-                (f[i + 1] - f[i]) / delta_rsq
-            };
+            let (a0, a1, a2, a3, b0, b1, b2, b3) = match grid_type {
+                GridType::UniformRsq => {
+                    // Legacy: polynomial in rsq-space
+                    let delta_rsq = rsq[i + 1] - rsq[i];
 
-            let b0 = f_i;
-            let b1 = delta_rsq * dfds_i;
-            let b2 = 3.0 * (f_i1 - f_i) - delta_rsq * (2.0 * dfds_i + dfds_i1);
-            let b3 = 2.0 * (f_i - f_i1) + delta_rsq * (dfds_i + dfds_i1);
+                    // dU/d(rsq) = dU/dr · dr/d(rsq) = -F(r) / (2r)
+                    let duds_i = if r_i > 1e-10 { -f_i / (2.0 * r_i) } else { 0.0 };
+                    let duds_i1 = if r_i1 > 1e-10 { -f_i1 / (2.0 * r_i1) } else { 0.0 };
+
+                    let a0 = u_i;
+                    let a1 = delta_rsq * duds_i;
+                    let a2 = 3.0 * (u_i1 - u_i) - delta_rsq * (2.0 * duds_i + duds_i1);
+                    let a3 = 2.0 * (u_i - u_i1) + delta_rsq * (duds_i + duds_i1);
+
+                    // df/d(rsq) using finite differences
+                    let dfds_i = if i > 0 {
+                        let delta_prev = rsq[i + 1] - rsq[i.saturating_sub(1)];
+                        (f[i + 1] - f[i.saturating_sub(1)]) / delta_prev
+                    } else {
+                        (f_i1 - f_i) / delta_rsq
+                    };
+                    let dfds_i1 = if i + 2 < n {
+                        let delta_next = rsq[i + 2] - rsq[i];
+                        (f[i + 2] - f[i]) / delta_next
+                    } else {
+                        (f_i1 - f_i) / delta_rsq
+                    };
+
+                    let b0 = f_i;
+                    let b1 = delta_rsq * dfds_i;
+                    let b2 = 3.0 * (f_i1 - f_i) - delta_rsq * (2.0 * dfds_i + dfds_i1);
+                    let b3 = 2.0 * (f_i - f_i1) + delta_rsq * (dfds_i + dfds_i1);
+
+                    (a0, a1, a2, a3, b0, b1, b2, b3)
+                }
+                GridType::UniformR => {
+                    // Recommended: polynomial in r-space
+                    // dU/dr = -F(r), so derivatives are simply -f
+                    let dudr_i = -f_i;
+                    let dudr_i1 = -f_i1;
+
+                    let a0 = u_i;
+                    let a1 = delta_r * dudr_i;
+                    let a2 = 3.0 * (u_i1 - u_i) - delta_r * (2.0 * dudr_i + dudr_i1);
+                    let a3 = 2.0 * (u_i - u_i1) + delta_r * (dudr_i + dudr_i1);
+
+                    // df/dr using finite differences
+                    let dfdr_i = if i > 0 {
+                        let r_prev = rsq[i.saturating_sub(1)].sqrt();
+                        (f_i1 - f[i.saturating_sub(1)]) / (r_i1 - r_prev)
+                    } else {
+                        (f_i1 - f_i) / delta_r
+                    };
+                    let dfdr_i1 = if i + 2 < n {
+                        let r_next = rsq[i + 2].sqrt();
+                        (f[i + 2] - f_i) / (r_next - r_i)
+                    } else {
+                        (f_i1 - f_i) / delta_r
+                    };
+
+                    let b0 = f_i;
+                    let b1 = delta_r * dfdr_i;
+                    let b2 = 3.0 * (f_i1 - f_i) - delta_r * (2.0 * dfdr_i + dfdr_i1);
+                    let b3 = 2.0 * (f_i - f_i1) + delta_r * (dfdr_i + dfdr_i1);
+
+                    (a0, a1, a2, a3, b0, b1, b2, b3)
+                }
+            };
 
             coeffs.push(SplineCoeffs {
                 u: [a0, a1, a2, a3],
@@ -361,18 +447,19 @@ impl SplinedPotential {
     /// Get the squared cutoff distance.
     #[inline]
     pub fn cutoff_squared(&self) -> f64 {
-        self.rsq_max
+        self.r_max * self.r_max
     }
 
     /// Get table statistics for debugging.
     pub fn stats(&self) -> SplineStats {
         SplineStats {
             n_points: self.n,
-            rsq_min: self.rsq_min,
-            rsq_max: self.rsq_max,
-            r_min: self.rsq_min.sqrt(),
-            r_max: self.rsq_max.sqrt(),
-            delta_rsq: self.delta_rsq,
+            rsq_min: self.r_min * self.r_min,
+            rsq_max: self.r_max * self.r_max,
+            r_min: self.r_min,
+            r_max: self.r_max,
+            delta: self.delta,
+            grid_type: self.grid_type,
             memory_bytes: self.coeffs.len() * std::mem::size_of::<SplineCoeffs>(),
             energy_shift: self.energy_shift,
         }
@@ -384,15 +471,17 @@ impl SplinedPotential {
         potential: &P,
         n_test: usize,
     ) -> ValidationResult {
+        let rsq_min = self.r_min * self.r_min;
+        let rsq_max = self.r_max * self.r_max;
         let mut max_u_err = 0.0f64;
         let mut max_f_err = 0.0f64;
-        let mut worst_rsq_u = self.rsq_min;
-        let mut worst_rsq_f = self.rsq_min;
+        let mut worst_rsq_u = rsq_min;
+        let mut worst_rsq_f = rsq_min;
 
         for i in 0..n_test {
             // Test at non-grid points (offset by 0.37 to avoid grid alignment)
             let t = (i as f64 + 0.37) / n_test as f64;
-            let rsq = self.rsq_min + t * (self.rsq_max - self.rsq_min);
+            let rsq = rsq_min + t * (rsq_max - rsq_min);
 
             let u_spline = self.isotropic_twobody_energy(rsq);
             let f_spline = self.isotropic_twobody_force(rsq);
@@ -442,7 +531,7 @@ impl Cutoff for SplinedPotential {
 
     #[inline]
     fn cutoff_squared(&self) -> f64 {
-        self.rsq_max
+        self.r_max * self.r_max
     }
 }
 
@@ -452,18 +541,34 @@ impl IsotropicTwobodyEnergy for SplinedPotential {
     /// Returns 0.0 if rsq >= cutoff².
     #[inline]
     fn isotropic_twobody_energy(&self, distance_squared: f64) -> f64 {
+        let rsq_max = self.r_max * self.r_max;
+
         // Fast path: beyond cutoff
-        if distance_squared >= self.rsq_max {
+        if distance_squared >= rsq_max {
             return 0.0;
         }
 
-        // Clamp to valid range
-        let rsq = distance_squared.max(self.rsq_min);
+        let rsq_min = self.r_min * self.r_min;
 
-        // Compute table index and fractional part (branchless)
-        let t = (rsq - self.rsq_min) * self.inv_delta_rsq;
-        let i = (t as usize).min(self.n - 2);
-        let eps = t - i as f64;
+        // Compute index and fractional part based on grid type
+        let (i, eps) = match self.grid_type {
+            GridType::UniformRsq => {
+                // Legacy: uniform in r² space
+                let rsq = distance_squared.max(rsq_min);
+                let t = (rsq - rsq_min) * self.inv_delta;
+                let i = (t as usize).min(self.n - 2);
+                let eps = t - i as f64;
+                (i, eps)
+            }
+            GridType::UniformR => {
+                // Recommended: uniform in r space
+                let r = distance_squared.sqrt().max(self.r_min);
+                let t = (r - self.r_min) * self.inv_delta;
+                let i = (t as usize).min(self.n - 2);
+                let eps = t - i as f64;
+                (i, eps)
+            }
+        };
 
         // Horner's method for polynomial evaluation
         let c = &self.coeffs[i];
@@ -475,14 +580,29 @@ impl IsotropicTwobodyEnergy for SplinedPotential {
     /// Returns 0.0 if rsq >= cutoff².
     #[inline]
     fn isotropic_twobody_force(&self, distance_squared: f64) -> f64 {
-        if distance_squared >= self.rsq_max {
+        let rsq_max = self.r_max * self.r_max;
+        if distance_squared >= rsq_max {
             return 0.0;
         }
 
-        let rsq = distance_squared.max(self.rsq_min);
-        let t = (rsq - self.rsq_min) * self.inv_delta_rsq;
-        let i = (t as usize).min(self.n - 2);
-        let eps = t - i as f64;
+        let rsq_min = self.r_min * self.r_min;
+
+        let (i, eps) = match self.grid_type {
+            GridType::UniformRsq => {
+                let rsq = distance_squared.max(rsq_min);
+                let t = (rsq - rsq_min) * self.inv_delta;
+                let i = (t as usize).min(self.n - 2);
+                let eps = t - i as f64;
+                (i, eps)
+            }
+            GridType::UniformR => {
+                let r = distance_squared.sqrt().max(self.r_min);
+                let t = (r - self.r_min) * self.inv_delta;
+                let i = (t as usize).min(self.n - 2);
+                let eps = t - i as f64;
+                (i, eps)
+            }
+        };
 
         let c = &self.coeffs[i];
         c.f[0] + eps * (c.f[1] + eps * (c.f[2] + eps * c.f[3]))
@@ -493,7 +613,8 @@ impl Debug for SplinedPotential {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SplinedPotential")
             .field("n_points", &self.n)
-            .field("rsq_range", &(self.rsq_min, self.rsq_max))
+            .field("r_range", &(self.r_min, self.r_max))
+            .field("grid_type", &self.grid_type)
             .field("cutoff", &self.cutoff)
             .finish()
     }
@@ -511,7 +632,9 @@ pub struct SplineStats {
     pub rsq_max: f64,
     pub r_min: f64,
     pub r_max: f64,
-    pub delta_rsq: f64,
+    /// Grid spacing: Δr for UniformR, Δ(r²) for UniformRsq
+    pub delta: f64,
+    pub grid_type: GridType,
     pub memory_bytes: usize,
     pub energy_shift: f64,
 }
@@ -592,10 +715,11 @@ pub struct SplineTableSimd {
     f2: Vec<f64>,
     f3: Vec<f64>,
     /// Grid parameters
-    rsq_min: f64,
-    rsq_max: f64,
-    inv_delta_rsq: f64,
+    r_min: f64,
+    r_max: f64,
+    inv_delta: f64,
     n: usize,
+    grid_type: GridType,
 }
 
 impl SplineTableSimd {
@@ -631,23 +755,39 @@ impl SplineTableSimd {
             f1,
             f2,
             f3,
-            rsq_min: spline.rsq_min,
-            rsq_max: spline.rsq_max,
-            inv_delta_rsq: spline.inv_delta_rsq,
+            r_min: spline.r_min,
+            r_max: spline.r_max,
+            inv_delta: spline.inv_delta,
             n: spline.n,
+            grid_type: spline.grid_type,
         }
     }
 
     /// Evaluate energy for a single distance (scalar fallback).
     #[inline]
     pub fn energy(&self, rsq: f64) -> f64 {
-        if rsq >= self.rsq_max {
+        let rsq_max = self.r_max * self.r_max;
+        if rsq >= rsq_max {
             return 0.0;
         }
-        let rsq = rsq.max(self.rsq_min);
-        let t = (rsq - self.rsq_min) * self.inv_delta_rsq;
-        let i = (t as usize).min(self.n - 2);
-        let eps = t - i as f64;
+
+        let (i, eps) = match self.grid_type {
+            GridType::UniformRsq => {
+                let rsq_min = self.r_min * self.r_min;
+                let rsq = rsq.max(rsq_min);
+                let t = (rsq - rsq_min) * self.inv_delta;
+                let i = (t as usize).min(self.n - 2);
+                let eps = t - i as f64;
+                (i, eps)
+            }
+            GridType::UniformR => {
+                let r = rsq.sqrt().max(self.r_min);
+                let t = (r - self.r_min) * self.inv_delta;
+                let i = (t as usize).min(self.n - 2);
+                let eps = t - i as f64;
+                (i, eps)
+            }
+        };
 
         // Horner's method
         self.u0[i] + eps * (self.u1[i] + eps * (self.u2[i] + eps * self.u3[i]))
@@ -656,18 +796,34 @@ impl SplineTableSimd {
     /// Evaluate energies for 4 distances using SIMD (f64x4).
     ///
     /// This is the core SIMD kernel - evaluates 4 spline lookups in parallel.
+    /// Note: For UniformR grid, this requires sqrt which may reduce SIMD benefits.
     #[inline]
     pub fn energy_x4(&self, rsq: f64x4) -> f64x4 {
-        let rsq_min = f64x4::splat(self.rsq_min);
-        let rsq_max = f64x4::splat(self.rsq_max);
-        let inv_delta = f64x4::splat(self.inv_delta_rsq);
-        let _n_max = (self.n - 2) as f64;
+        let rsq_max = f64x4::splat(self.r_max * self.r_max);
+        let inv_delta = f64x4::splat(self.inv_delta);
 
-        // Clamp to valid range
-        let rsq_clamped = rsq.max(rsq_min).min(rsq_max);
-
-        // Compute indices and fractional parts
-        let t = (rsq_clamped - rsq_min) * inv_delta;
+        // Compute t values based on grid type
+        let t = match self.grid_type {
+            GridType::UniformRsq => {
+                let rsq_min = f64x4::splat(self.r_min * self.r_min);
+                let rsq_clamped = rsq.max(rsq_min).min(rsq_max);
+                (rsq_clamped - rsq_min) * inv_delta
+            }
+            GridType::UniformR => {
+                // Need sqrt for UniformR grid
+                let r_min = f64x4::splat(self.r_min);
+                let r_max = f64x4::splat(self.r_max);
+                let rsq_arr: [f64; 4] = rsq.into();
+                let r = f64x4::from([
+                    rsq_arr[0].sqrt(),
+                    rsq_arr[1].sqrt(),
+                    rsq_arr[2].sqrt(),
+                    rsq_arr[3].sqrt(),
+                ]);
+                let r_clamped = r.max(r_min).min(r_max);
+                (r_clamped - r_min) * inv_delta
+            }
+        };
 
         // Extract indices (need scalar conversion for gather)
         let t_arr: [f64; 4] = t.into();
@@ -771,7 +927,8 @@ impl Debug for SplineTableSimd {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SplineTableSimd")
             .field("n_intervals", &self.u0.len())
-            .field("rsq_range", &(self.rsq_min, self.rsq_max))
+            .field("r_range", &(self.r_min, self.r_max))
+            .field("grid_type", &self.grid_type)
             .field("memory_bytes", &self.memory_bytes())
             .finish()
     }
@@ -784,7 +941,204 @@ impl Debug for SplineTableSimd {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::twobody::LennardJones;
+    use crate::twobody::{AshbaughHatch, Combined, IonIon, LennardJones};
+    use coulomb::pairwise::Yukawa;
+    use coulomb::permittivity::ConstantPermittivity;
+
+    /// Test cubic Hermite spline for AshbaughHatch + Yukawa from 0 to 100 Å.
+    ///
+    /// This test prints actual energy values at various distances for debugging.
+    #[test]
+    fn test_splined_ashbaugh_hatch_yukawa() {
+        // Create AshbaughHatch potential
+        let epsilon = 0.8; // kJ/mol
+        let sigma = 3.0; // Å
+        let lambda = 0.5; // hydrophobicity
+        let cutoff = 100.0; // Å
+        let lj = LennardJones::new(epsilon, sigma);
+        let ah = AshbaughHatch::new(lj, lambda, cutoff);
+
+        // Create Yukawa potential (screened electrostatics)
+        let charge_product = 1.0; // e²
+        let permittivity = ConstantPermittivity::new(80.0);
+        let debye_length = 50.0; // Å
+        let yukawa_scheme = Yukawa::new(cutoff, Some(debye_length));
+        let yukawa = IonIon::new(charge_product, permittivity, yukawa_scheme);
+
+        // Combine potentials
+        let combined = Combined::new(ah.clone(), yukawa.clone());
+
+        // Create splined version with range 0 to 100 Å
+        let rsq_min = 0.01; // Avoid singularity at r=0
+        let rsq_max = cutoff * cutoff; // 10000 Å²
+        let config = SplineConfig::high_accuracy()
+            .with_rsq_min(rsq_min)
+            .with_rsq_max(rsq_max);
+        let splined = SplinedPotential::with_cutoff(&combined, cutoff, config);
+
+        println!("\n=== AshbaughHatch + Yukawa Spline Test ===");
+        println!(
+            "AshbaughHatch: ε={}, σ={}, λ={}, cutoff={}",
+            epsilon, sigma, lambda, cutoff
+        );
+        println!(
+            "Yukawa: z₁z₂={}, εᵣ={}, λD={}, cutoff={}",
+            charge_product, 80.0, debye_length, cutoff
+        );
+        println!("Spline: rsq_min={}, rsq_max={}\n", rsq_min, rsq_max);
+
+        // Test distances from 0.1 to 100 Å
+        let test_distances = [
+            0.1, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 30.0, 50.0, 70.0, 90.0, 100.0,
+        ];
+
+        println!(
+            "{:>8} {:>15} {:>15} {:>15} {:>12}",
+            "r (Å)", "u_exact", "u_spline", "u_diff", "rel_err"
+        );
+        println!("{}", "-".repeat(70));
+
+        for &r in &test_distances {
+            let rsq = r * r;
+            if rsq < rsq_min || rsq > rsq_max {
+                continue;
+            }
+
+            let u_exact = combined.isotropic_twobody_energy(rsq);
+            let u_spline = splined.isotropic_twobody_energy(rsq);
+            let diff = u_spline - u_exact;
+            let rel_err = if u_exact.abs() > 1e-10 {
+                (diff / u_exact).abs()
+            } else {
+                diff.abs()
+            };
+
+            println!(
+                "{:>8.2} {:>15.6e} {:>15.6e} {:>15.6e} {:>12.2e}",
+                r, u_exact, u_spline, diff, rel_err
+            );
+
+            // Assert reasonable accuracy (1% for most points, higher tolerance near singularities)
+            if r > sigma {
+                assert!(
+                    rel_err < 0.01 || diff.abs() < 1e-6,
+                    "Large error at r={}: exact={}, spline={}, rel_err={}",
+                    r,
+                    u_exact,
+                    u_spline,
+                    rel_err
+                );
+            }
+        }
+
+        // Additional validation using the built-in method
+        let validation = splined.validate(&combined, 1000);
+        println!("\n=== Validation Results ===");
+        println!("Max energy error: {:.6e}", validation.max_energy_error);
+        println!("Max force error: {:.6e}", validation.max_force_error);
+        println!(
+            "Worst rsq (energy): {:.2} (r={:.2} Å)",
+            validation.worst_rsq_energy,
+            validation.worst_rsq_energy.sqrt()
+        );
+        println!(
+            "Worst rsq (force): {:.2} (r={:.2} Å)",
+            validation.worst_rsq_force,
+            validation.worst_rsq_force.sqrt()
+        );
+
+        // Print stats
+        let stats = splined.stats();
+        println!("\n=== Spline Stats ===");
+        println!("n_points: {}", stats.n_points);
+        println!("r_min: {:.4} Å", stats.r_min);
+        println!("r_max: {:.4} Å", stats.r_max);
+        println!("grid_type: {:?}", stats.grid_type);
+        println!("delta: {:.6} (Δr for UniformR, Δr² for UniformRsq)", stats.delta);
+        println!("memory_bytes: {}", stats.memory_bytes);
+        println!("energy_shift: {:.6e}", stats.energy_shift);
+
+        // Diagnostic: examine grid spacing
+        println!("\n=== Grid Spacing Diagnostic ===");
+        let delta = stats.delta;
+        let r_min_val = stats.r_min;
+        match stats.grid_type {
+            GridType::UniformR => {
+                println!("Grid type: UniformR (constant Δr = {:.4} Å)", delta);
+                println!("This gives uniform spacing in r-space, denser in r²-space at short range.");
+            }
+            GridType::UniformRsq => {
+                println!("Grid type: UniformRsq (constant Δr² = {:.4})", delta);
+                println!("delta_r at r=0.1 Å: {:.4} Å", ((0.01 + delta).sqrt() - 0.1));
+                println!("delta_r at r=1.0 Å: {:.4} Å", ((1.0 + delta).sqrt() - 1.0));
+                println!("delta_r at r=10 Å: {:.4} Å", ((100.0 + delta).sqrt() - 10.0));
+            }
+        }
+
+        // Show first few grid points
+        println!("\nFirst 10 grid points:");
+        for i in 0..10 {
+            let r_i = r_min_val + i as f64 * delta;
+            let rsq_i = r_i * r_i;
+            let u_i = combined.isotropic_twobody_energy(rsq_i);
+            println!(
+                "  i={}: r={:.4} Å, rsq={:.4}, u={:.6e}",
+                i, r_i, rsq_i, u_i
+            );
+        }
+
+        // Examine interpolation at r=0.5 Å
+        println!("\n=== Interpolation at r=0.5 Å ===");
+        let r_test = 0.5;
+        let rsq_test = r_test * r_test;
+        let t = (r_test - r_min_val) / delta;
+        let i = t as usize;
+        let eps = t - i as f64;
+        println!("t = (r - r_min) / delta = ({} - {}) / {} = {}", r_test, r_min_val, delta, t);
+        println!("interval index i = {}", i);
+        println!("fractional part eps = {:.6}", eps);
+
+        // Grid points bounding this interval
+        let r_lo = r_min_val + i as f64 * delta;
+        let r_hi = r_min_val + (i + 1) as f64 * delta;
+        let rsq_lo = r_lo * r_lo;
+        let rsq_hi = r_hi * r_hi;
+        let u_lo = combined.isotropic_twobody_energy(rsq_lo);
+        let u_hi = combined.isotropic_twobody_energy(rsq_hi);
+        let f_lo = combined.isotropic_twobody_force(rsq_lo);
+        let f_hi = combined.isotropic_twobody_force(rsq_hi);
+
+        println!("\nInterval [{}, {}]:", i, i + 1);
+        println!("  r:   [{:.4}, {:.4}] Å", r_lo, r_hi);
+        println!("  rsq: [{:.4}, {:.4}]", rsq_lo, rsq_hi);
+        println!("  u:   [{:.6e}, {:.6e}]", u_lo, u_hi);
+        println!("  f:   [{:.6e}, {:.6e}]", f_lo, f_hi);
+        println!("  u ratio: {:.2e}", u_lo / u_hi);
+
+        // Compute derivatives for Hermite (in r-space for UniformR)
+        let dudr_lo = -f_lo;  // dU/dr = -F
+        let dudr_hi = -f_hi;
+        println!("\nDerivatives dU/dr:");
+        println!("  at r_lo: {:.6e}", dudr_lo);
+        println!("  at r_hi: {:.6e}", dudr_hi);
+
+        // Hermite coefficients (in r-space for UniformR grid)
+        let a0 = u_lo;
+        let a1 = delta * dudr_lo;
+        let a2 = 3.0 * (u_hi - u_lo) - delta * (2.0 * dudr_lo + dudr_hi);
+        let a3 = 2.0 * (u_lo - u_hi) + delta * (dudr_lo + dudr_hi);
+        println!("\nHermite coefficients (r-space):");
+        println!("  a0 = {:.6e}", a0);
+        println!("  a1 = {:.6e}", a1);
+        println!("  a2 = {:.6e}", a2);
+        println!("  a3 = {:.6e}", a3);
+
+        // Evaluate polynomial at eps
+        let u_interp = a0 + eps * (a1 + eps * (a2 + eps * a3));
+        println!("\nPolynomial evaluation at eps={:.6}:", eps);
+        println!("  u_interp = {:.6e}", u_interp);
+        println!("  u_exact  = {:.6e}", combined.isotropic_twobody_energy(rsq_test));
+    }
 
     #[test]
     fn test_splined_lj_energy() {

@@ -43,7 +43,7 @@ pub use fene::FENE;
 pub use hardsphere::HardSphere;
 pub use harmonic::Harmonic;
 pub use hermite::{
-    spline_potential, SplineConfig, SplineStats, SplineTableSimd, SplinedPotential,
+    spline_potential, GridType, SplineConfig, SplineStats, SplineTableSimd, SplinedPotential,
     ValidationResult,
 };
 pub use kimhummer::KimHummer;
