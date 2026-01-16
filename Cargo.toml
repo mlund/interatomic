@@ -22,6 +22,7 @@ num = "0.4"
 physical_constants = "0.5"
 coulomb = { git = "https://github.com/mlund/coulomb.git", version = "0.2", features = ["serde"] }
 dyn-clone = "1.0.17"
+wide = "0.7"
 
 [dev-dependencies]
 approx = "0.5"

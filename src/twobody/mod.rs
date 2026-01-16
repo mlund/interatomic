@@ -29,6 +29,7 @@ mod ashbaugh_hatch;
 mod fene;
 mod hardsphere;
 mod harmonic;
+mod hermite;
 mod kimhummer;
 mod lennard_jones;
 mod mie;
@@ -41,6 +42,10 @@ pub use ashbaugh_hatch::AshbaughHatch;
 pub use fene::FENE;
 pub use hardsphere::HardSphere;
 pub use harmonic::Harmonic;
+pub use hermite::{
+    spline_potential, SplineConfig, SplineStats, SplineTableSimd, SplinedPotential,
+    ValidationResult,
+};
 pub use kimhummer::KimHummer;
 pub use lennard_jones::LennardJones;
 pub use mie::Mie;
