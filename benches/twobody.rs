@@ -1,58 +1,63 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use interatomic::twobody::{
-    IsotropicTwobodyEnergy, KimHummer, LennardJones, Mie, SplineConfig, SplinedPotential,
-    WeeksChandlerAndersen,
+    AshbaughHatch, IsotropicTwobodyEnergy, KimHummer, LennardJones, Mie, SplineConfig,
+    SplinedPotential, WeeksChandlerAndersen,
 };
+use interatomic::Cutoff;
 
-/// Custom potential: LJ + A/r * exp(-B*r)
-/// This is more expensive to compute than pure LJ, showing spline benefits
+/// Combined potential: Ashbaugh-Hatch + Yukawa (A/r * exp(-B*r))
+///
+/// This represents a more realistic and expensive potential than pure LJ,
+/// demonstrating the benefits of spline tabulation.
 #[derive(Debug, Clone)]
-struct LJYukawa {
-    /// LJ epsilon
-    epsilon: f64,
-    /// LJ sigma
-    sigma: f64,
-    /// Yukawa prefactor A
+struct AshbaughHatchYukawa {
+    /// Ashbaugh-Hatch potential (truncated-shifted LJ with hydrophobicity scaling)
+    ashbaugh_hatch: AshbaughHatch,
+    /// Yukawa prefactor A (e.g., charge product / dielectric)
     yukawa_a: f64,
-    /// Yukawa decay B
+    /// Yukawa inverse screening length B (1/Debye length)
     yukawa_b: f64,
 }
 
-impl LJYukawa {
-    fn new(epsilon: f64, sigma: f64, yukawa_a: f64, yukawa_b: f64) -> Self {
+impl AshbaughHatchYukawa {
+    fn new(ashbaugh_hatch: AshbaughHatch, yukawa_a: f64, yukawa_b: f64) -> Self {
         Self {
-            epsilon,
-            sigma,
+            ashbaugh_hatch,
             yukawa_a,
             yukawa_b,
         }
     }
 }
 
+impl Cutoff for AshbaughHatchYukawa {
+    fn cutoff(&self) -> f64 {
+        self.ashbaugh_hatch.cutoff()
+    }
+    fn cutoff_squared(&self) -> f64 {
+        self.ashbaugh_hatch.cutoff_squared()
+    }
+}
+
 // Note: AnisotropicTwobodyEnergy is provided by blanket impl in interatomic
 
-impl IsotropicTwobodyEnergy for LJYukawa {
+impl IsotropicTwobodyEnergy for AshbaughHatchYukawa {
     fn isotropic_twobody_energy(&self, rsq: f64) -> f64 {
         let r = rsq.sqrt();
-        // LJ part
-        let s2 = self.sigma * self.sigma / rsq;
-        let s6 = s2 * s2 * s2;
-        let lj = 4.0 * self.epsilon * s6 * (s6 - 1.0);
+        // Ashbaugh-Hatch part (includes cutoff handling)
+        let ah = self.ashbaugh_hatch.isotropic_twobody_energy(rsq);
         // Yukawa part: A/r * exp(-B*r)
         let yukawa = self.yukawa_a / r * (-self.yukawa_b * r).exp();
-        lj + yukawa
+        ah + yukawa
     }
 
     fn isotropic_twobody_force(&self, rsq: f64) -> f64 {
         let r = rsq.sqrt();
-        // LJ force: -dU/dr
-        let s2 = self.sigma * self.sigma / rsq;
-        let s6 = s2 * s2 * s2;
-        let lj_force = 24.0 * self.epsilon / r * s6 * (2.0 * s6 - 1.0);
+        // Ashbaugh-Hatch force
+        let ah_force = self.ashbaugh_hatch.isotropic_twobody_force(rsq);
         // Yukawa force: -d/dr[A/r * exp(-B*r)] = A*exp(-B*r)*(1/r² + B/r)
         let exp_br = (-self.yukawa_b * r).exp();
         let yukawa_force = self.yukawa_a * exp_br * (1.0 / rsq + self.yukawa_b / r);
-        lj_force + yukawa_force
+        ah_force + yukawa_force
     }
 }
 
@@ -220,10 +225,11 @@ fn bench_spline_single(c: &mut Criterion) {
         b.iter(|| lj.isotropic_twobody_energy(black_box(r_squared)))
     });
 
-    // LJ + Yukawa (more expensive)
-    let ljy = LJYukawa::new(epsilon, sigma, 10.0, 0.5);
-    group.bench_function("LJYukawa_analytical", |b| {
-        b.iter(|| ljy.isotropic_twobody_energy(black_box(r_squared)))
+    // Ashbaugh-Hatch + Yukawa (more expensive)
+    let ah = AshbaughHatch::new(lj.clone(), 0.5, cutoff); // lambda=0.5 for intermediate hydrophobicity
+    let ahy = AshbaughHatchYukawa::new(ah, 10.0, 0.5);
+    group.bench_function("AH_Yukawa_analytical", |b| {
+        b.iter(|| ahy.isotropic_twobody_energy(black_box(r_squared)))
     });
 
     // Splined LJ
@@ -237,10 +243,10 @@ fn bench_spline_single(c: &mut Criterion) {
         b.iter(|| splined_lj.isotropic_twobody_energy(black_box(r_squared)))
     });
 
-    // Splined LJ+Yukawa
-    let splined_ljy = SplinedPotential::with_cutoff(&ljy, cutoff, config);
-    group.bench_function("LJYukawa_splined", |b| {
-        b.iter(|| splined_ljy.isotropic_twobody_energy(black_box(r_squared)))
+    // Splined AH+Yukawa
+    let splined_ahy = SplinedPotential::with_cutoff(&ahy, cutoff, config);
+    group.bench_function("AH_Yukawa_splined", |b| {
+        b.iter(|| splined_ahy.isotropic_twobody_energy(black_box(r_squared)))
     });
 
     group.finish();
@@ -248,8 +254,6 @@ fn bench_spline_single(c: &mut Criterion) {
 
 /// Spline batch evaluation benchmarks comparing scalar vs SIMD
 fn bench_spline_batch(c: &mut Criterion) {
-    use interatomic::twobody::SplineTableSimd;
-
     let mut group = c.benchmark_group("spline_batch");
     group.sample_size(100);
 
@@ -282,33 +286,34 @@ fn bench_spline_batch(c: &mut Criterion) {
         },
     );
 
-    // ========== LJ + Yukawa (expensive) ==========
+    // ========== Ashbaugh-Hatch + Yukawa (expensive) ==========
 
-    let ljy = LJYukawa::new(epsilon, sigma, 10.0, 0.5);
+    let ah = AshbaughHatch::new(lj.clone(), 0.5, cutoff);
+    let ahy = AshbaughHatchYukawa::new(ah, 10.0, 0.5);
     group.bench_with_input(
-        BenchmarkId::new("LJYukawa_analytical", n_pairs),
+        BenchmarkId::new("AH_Yukawa_analytical", n_pairs),
         &distances,
         |b, dists| {
             b.iter(|| {
                 dists
                     .iter()
-                    .map(|&r2| ljy.isotropic_twobody_energy(r2))
+                    .map(|&r2| ahy.isotropic_twobody_energy(r2))
                     .sum::<f64>()
             })
         },
     );
 
-    // ========== Splined LJ+Yukawa: scalar ==========
+    // ========== Splined AH+Yukawa: scalar ==========
 
     let config = SplineConfig {
         n_points: 2000,
         rsq_min: Some((0.8 * sigma).powi(2)),
         ..Default::default()
     };
-    let splined = SplinedPotential::with_cutoff(&ljy, cutoff, config);
+    let splined = SplinedPotential::with_cutoff(&ahy, cutoff, config);
 
     group.bench_with_input(
-        BenchmarkId::new("LJYukawa_splined_scalar", n_pairs),
+        BenchmarkId::new("AH_Yukawa_splined_scalar", n_pairs),
         &distances,
         |b, dists| {
             b.iter(|| {
@@ -325,7 +330,7 @@ fn bench_spline_batch(c: &mut Criterion) {
     let simd_table = splined.to_simd();
 
     group.bench_with_input(
-        BenchmarkId::new("LJYukawa_splined_simd", n_pairs),
+        BenchmarkId::new("AH_Yukawa_splined_simd", n_pairs),
         &distances,
         |b, dists| {
             b.iter(|| simd_table.sum_energies_simd(dists))
@@ -337,7 +342,7 @@ fn bench_spline_batch(c: &mut Criterion) {
     let mut energies = vec![0.0; n_pairs];
 
     group.bench_with_input(
-        BenchmarkId::new("LJYukawa_splined_simd_batch", n_pairs),
+        BenchmarkId::new("AH_Yukawa_splined_simd_batch", n_pairs),
         &distances,
         |b, dists| {
             b.iter(|| {
