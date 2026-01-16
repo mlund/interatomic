@@ -17,7 +17,7 @@ repository = "https://github.com/mlund/interatomic"
 serde = { version = "1.0", features = ["derive"], optional = true }
 anyhow = "1.0"
 itertools = "0.10"
-nalgebra = { version = "0.33", features = ["serde-serialize"] }
+nalgebra = { version = "0.34.1", features = ["serde-serialize"] }
 num = "0.4"
 physical_constants = "0.5"
 coulomb = { git = "https://github.com/mlund/coulomb.git", version = "0.2", features = ["serde"] }
