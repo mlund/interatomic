@@ -70,7 +70,7 @@ impl Debug for SplineCoeffs {
 ///
 /// The choice of grid type significantly affects accuracy for potentials
 /// with steep repulsive cores (like Lennard-Jones).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum GridType {
     /// Uniform spacing in r² (legacy behavior).
     /// Gives sparser sampling at short range — poor for steep potentials.
@@ -80,14 +80,12 @@ pub enum GridType {
     UniformR,
     /// Power-law mapping: r(x) = r_min + (r_max - r_min) * x^p where x ∈ [0,1] is uniform.
     /// For p > 1, gives denser sampling at short range (recommended for steep potentials).
-    /// Default is p = 2.0.
     PowerLaw(f64),
-}
-
-impl Default for GridType {
-    fn default() -> Self {
-        GridType::PowerLaw(2.0)
-    }
+    /// Optimized power-law mapping with p=2 (default).
+    /// Uses `x*x` and `sqrt()` instead of `powf()` for better performance.
+    /// Equivalent to `PowerLaw(2.0)` but faster.
+    #[default]
+    PowerLaw2,
 }
 
 /// Configuration for spline table construction
@@ -346,6 +344,34 @@ impl SplinedPotential {
                 // Store p in delta field for use in evaluation
                 (p, rsq_vals, u_vals, f_vals)
             }
+            GridType::PowerLaw2 => {
+                // Optimized power-law mapping with p=2: r(x) = r_min + (r_max - r_min) * x²
+                // Uses x*x instead of powf(2.0) for efficiency.
+                let r_range = r_max - r_min;
+                let mut rsq_vals = Vec::with_capacity(n);
+                let mut u_vals = Vec::with_capacity(n);
+                let mut f_vals = Vec::with_capacity(n);
+
+                for i in 0..n {
+                    let x = i as f64 / (n - 1) as f64;
+                    let r = r_min + r_range * x * x; // x² instead of x.powf(2.0)
+                    let rsq = r * r;
+                    rsq_vals.push(rsq);
+
+                    let mut u = potential.isotropic_twobody_energy(rsq) - energy_shift;
+                    let mut f = potential.isotropic_twobody_force(rsq);
+
+                    if config.shift_force {
+                        u -= (r - r_max) * force_shift;
+                        f -= force_shift;
+                    }
+
+                    u_vals.push(u);
+                    f_vals.push(f);
+                }
+                // Store p=2.0 in delta field for use in evaluation
+                (2.0, rsq_vals, u_vals, f_vals)
+            }
         };
 
         let inv_delta = 1.0 / delta;
@@ -521,6 +547,49 @@ impl SplinedPotential {
 
                     (a0, a1, a2, a3, b0, b1, b2, b3)
                 }
+                GridType::PowerLaw2 => {
+                    // Optimized p=2 case: dr/dx = 2 * r_range * x (since x^(p-1) = x^1 = x)
+                    let delta_x = 1.0 / (n - 1) as f64;
+                    let x_i = i as f64 * delta_x;
+                    let x_i1 = (i + 1) as f64 * delta_x;
+
+                    let r_range = rsq.last().unwrap().sqrt() - rsq.first().unwrap().sqrt();
+                    // dr/dx = 2 * r_range * x for p=2
+                    let drdx_i = if x_i > 1e-10 {
+                        2.0 * r_range * x_i
+                    } else {
+                        2.0 * r_range * 1e-10
+                    };
+                    let drdx_i1 = 2.0 * r_range * x_i1;
+
+                    let dudx_i = -f_i * drdx_i;
+                    let dudx_i1 = -f_i1 * drdx_i1;
+
+                    let a0 = u_i;
+                    let a1 = delta_x * dudx_i;
+                    let a2 = 3.0 * (u_i1 - u_i) - delta_x * (2.0 * dudx_i + dudx_i1);
+                    let a3 = 2.0 * (u_i - u_i1) + delta_x * (dudx_i + dudx_i1);
+
+                    let dfdx_i = if i > 0 {
+                        let x_prev = (i - 1) as f64 * delta_x;
+                        (f_i1 - f[i - 1]) / (x_i1 - x_prev)
+                    } else {
+                        (f_i1 - f_i) / delta_x
+                    };
+                    let dfdx_i1 = if i + 2 < n {
+                        let x_next = (i + 2) as f64 * delta_x;
+                        (f[i + 2] - f_i) / (x_next - x_i)
+                    } else {
+                        (f_i1 - f_i) / delta_x
+                    };
+
+                    let b0 = f_i;
+                    let b1 = delta_x * dfdx_i;
+                    let b2 = 3.0 * (f_i1 - f_i) - delta_x * (2.0 * dfdx_i + dfdx_i1);
+                    let b3 = 2.0 * (f_i - f_i1) + delta_x * (dfdx_i + dfdx_i1);
+
+                    (a0, a1, a2, a3, b0, b1, b2, b3)
+                }
             };
 
             coeffs.push(SplineCoeffs {
@@ -671,6 +740,16 @@ impl IsotropicTwobodyEnergy for SplinedPotential {
                 let eps = t - i as f64;
                 (i, eps)
             }
+            GridType::PowerLaw2 => {
+                // Optimized p=2: x = sqrt((r - r_min) / (r_max - r_min))
+                let r = distance_squared.sqrt().max(self.r_min);
+                let r_range = self.r_max - self.r_min;
+                let x = ((r - self.r_min) / r_range).sqrt(); // sqrt instead of powf(0.5)
+                let t = x * (self.n - 1) as f64;
+                let i = (t as usize).min(self.n - 2);
+                let eps = t - i as f64;
+                (i, eps)
+            }
         };
 
         // Horner's method for polynomial evaluation
@@ -709,6 +788,16 @@ impl IsotropicTwobodyEnergy for SplinedPotential {
                 let r = distance_squared.sqrt().max(self.r_min);
                 let r_range = self.r_max - self.r_min;
                 let x = ((r - self.r_min) / r_range).powf(1.0 / p);
+                let t = x * (self.n - 1) as f64;
+                let i = (t as usize).min(self.n - 2);
+                let eps = t - i as f64;
+                (i, eps)
+            }
+            GridType::PowerLaw2 => {
+                // Optimized p=2: x = sqrt((r - r_min) / (r_max - r_min))
+                let r = distance_squared.sqrt().max(self.r_min);
+                let r_range = self.r_max - self.r_min;
+                let x = ((r - self.r_min) / r_range).sqrt();
                 let t = x * (self.n - 1) as f64;
                 let i = (t as usize).min(self.n - 2);
                 let eps = t - i as f64;
@@ -912,6 +1001,15 @@ impl SplineTableSimd {
                 let eps = t - i as f64;
                 (i, eps)
             }
+            GridType::PowerLaw2 => {
+                let r = rsq.sqrt().max(self.r_min);
+                let r_range = self.r_max - self.r_min;
+                let x = ((r - self.r_min) / r_range).sqrt();
+                let t = x * (self.n - 1) as f64;
+                let i = (t as usize).min(self.n - 2);
+                let eps = t - i as f64;
+                (i, eps)
+            }
         };
 
         // Horner's method
@@ -972,6 +1070,31 @@ impl SplineTableSimd {
                     {
                         let r = rsq_arr[3].sqrt().max(self.r_min).min(self.r_max);
                         ((r - self.r_min) / r_range).powf(inv_p) * n_minus_1
+                    },
+                ])
+            }
+            GridType::PowerLaw2 => {
+                // Optimized p=2: x = sqrt((r - r_min) / r_range), t = x * (n-1)
+                // Uses sqrt instead of powf(0.5)
+                let r_range = self.r_max - self.r_min;
+                let n_minus_1 = (self.n - 1) as f64;
+                let rsq_arr: [f64; 4] = rsq.into();
+                f64x4::from([
+                    {
+                        let r = rsq_arr[0].sqrt().max(self.r_min).min(self.r_max);
+                        ((r - self.r_min) / r_range).sqrt() * n_minus_1
+                    },
+                    {
+                        let r = rsq_arr[1].sqrt().max(self.r_min).min(self.r_max);
+                        ((r - self.r_min) / r_range).sqrt() * n_minus_1
+                    },
+                    {
+                        let r = rsq_arr[2].sqrt().max(self.r_min).min(self.r_max);
+                        ((r - self.r_min) / r_range).sqrt() * n_minus_1
+                    },
+                    {
+                        let r = rsq_arr[3].sqrt().max(self.r_min).min(self.r_max);
+                        ((r - self.r_min) / r_range).sqrt() * n_minus_1
                     },
                 ])
             }
@@ -1238,6 +1361,10 @@ mod tests {
             GridType::PowerLaw(p) => {
                 println!("Grid type: PowerLaw (p = {:.1})", p);
                 println!("Mapping: r(x) = r_min + (r_max - r_min) * x^p, denser at short range for p > 1");
+            }
+            GridType::PowerLaw2 => {
+                println!("Grid type: PowerLaw2 (p = 2, optimized)");
+                println!("Mapping: r(x) = r_min + (r_max - r_min) * x², denser at short range");
             }
         }
 
@@ -1643,14 +1770,205 @@ mod tests {
         );
     }
 
-    /// Test that default GridType is PowerLaw(2.0).
+    /// Test that default GridType is PowerLaw2.
     #[test]
-    fn test_default_grid_type_is_powerlaw() {
+    fn test_default_grid_type_is_powerlaw2() {
         let default = GridType::default();
         assert_eq!(
             default,
-            GridType::PowerLaw(2.0),
-            "Default GridType should be PowerLaw(2.0) to prevent sign reversals"
+            GridType::PowerLaw2,
+            "Default GridType should be PowerLaw2 to prevent sign reversals"
         );
+    }
+
+    /// Test that PowerLaw2 produces identical results to PowerLaw(2.0).
+    #[test]
+    fn test_powerlaw2_matches_powerlaw_2() {
+        let lj = LennardJones::new(1.0, 1.0);
+        let cutoff = 2.5;
+        let rsq_min = 0.5;
+
+        let splined_p2 = SplinedPotential::with_cutoff(
+            &lj,
+            cutoff,
+            SplineConfig::default()
+                .with_rsq_min(rsq_min)
+                .with_grid_type(GridType::PowerLaw(2.0)),
+        );
+
+        let splined_opt = SplinedPotential::with_cutoff(
+            &lj,
+            cutoff,
+            SplineConfig::default()
+                .with_rsq_min(rsq_min)
+                .with_grid_type(GridType::PowerLaw2),
+        );
+
+        // Test energy and force at multiple distances
+        let test_rsq = [0.6, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0];
+        for &rsq in &test_rsq {
+            let u_p2 = splined_p2.isotropic_twobody_energy(rsq);
+            let u_opt = splined_opt.isotropic_twobody_energy(rsq);
+            let f_p2 = splined_p2.isotropic_twobody_force(rsq);
+            let f_opt = splined_opt.isotropic_twobody_force(rsq);
+
+            let u_diff = (u_p2 - u_opt).abs();
+            let f_diff = (f_p2 - f_opt).abs();
+
+            assert!(
+                u_diff < 1e-12,
+                "Energy mismatch at rsq={}: PowerLaw(2.0)={}, PowerLaw2={}, diff={}",
+                rsq,
+                u_p2,
+                u_opt,
+                u_diff
+            );
+            assert!(
+                f_diff < 1e-12,
+                "Force mismatch at rsq={}: PowerLaw(2.0)={}, PowerLaw2={}, diff={}",
+                rsq,
+                f_p2,
+                f_opt,
+                f_diff
+            );
+        }
+    }
+
+    /// Test that PowerLaw2 SIMD matches scalar.
+    #[test]
+    fn test_powerlaw2_simd_matches_scalar() {
+        let lj = LennardJones::new(1.0, 1.0);
+        let cutoff = 2.5;
+        let splined = SplinedPotential::with_cutoff(
+            &lj,
+            cutoff,
+            SplineConfig::default().with_grid_type(GridType::PowerLaw2),
+        );
+        let simd = splined.to_simd();
+
+        let distances: Vec<f64> = (0..100)
+            .map(|i| 1.0 + 0.05 * i as f64)
+            .collect();
+
+        let scalar_sum: f64 = distances
+            .iter()
+            .map(|&r2| splined.isotropic_twobody_energy(r2))
+            .sum();
+
+        let simd_sum = simd.sum_energies_simd(&distances);
+
+        let rel_err = ((scalar_sum - simd_sum) / scalar_sum).abs();
+        assert!(
+            rel_err < 1e-10,
+            "PowerLaw2 SIMD/scalar mismatch: scalar={}, simd={}, err={}",
+            scalar_sum,
+            simd_sum,
+            rel_err
+        );
+    }
+
+    /// Test that PowerLaw2 has no sign reversal at short range (like PowerLaw(2.0)).
+    #[test]
+    fn test_powerlaw2_no_sign_reversal() {
+        let lj = LennardJones::new(1.0, 1.0);
+        let cutoff = 2.5;
+        let rsq_min = 0.01;
+
+        let splined = SplinedPotential::with_cutoff(
+            &lj,
+            cutoff,
+            SplineConfig::default()
+                .with_rsq_min(rsq_min)
+                .with_grid_type(GridType::PowerLaw2),
+        );
+
+        // Scan repulsive region
+        for i in 0..4000 {
+            let r = 0.1 + (i as f64) * 0.0001;
+            let rsq = r * r;
+            if rsq < rsq_min {
+                continue;
+            }
+
+            let u_exact = lj.isotropic_twobody_energy(rsq);
+            let u_spline = splined.isotropic_twobody_energy(rsq);
+
+            if u_exact > 0.0 {
+                assert!(
+                    u_spline > 0.0,
+                    "PowerLaw2 sign reversal at r={:.4}: exact={:.3e}, spline={:.3e}",
+                    r,
+                    u_exact,
+                    u_spline
+                );
+            }
+        }
+    }
+
+    /// Test PowerLaw2 with AshbaughHatch + Yukawa combination.
+    #[test]
+    fn test_powerlaw2_ah_yukawa() {
+        let lj = LennardJones::new(0.8, 3.0);
+        let ah = AshbaughHatch::new(lj, 0.5, 100.0);
+        let yukawa = IonIon::new(
+            1.0,
+            ConstantPermittivity::new(80.0),
+            Yukawa::new(100.0, Some(50.0)),
+        );
+        let combined = Combined::new(ah, yukawa);
+
+        let rsq_min = 0.01;
+        let splined = SplinedPotential::with_cutoff(
+            &combined,
+            100.0,
+            SplineConfig::high_accuracy()
+                .with_rsq_min(rsq_min)
+                .with_grid_type(GridType::PowerLaw2),
+        );
+
+        // Test accuracy at various distances
+        let test_distances = [0.5, 1.0, 10.0, 30.0, 40.0];
+        for &r in &test_distances {
+            let rsq = r * r;
+            let u_exact = combined.isotropic_twobody_energy(rsq);
+            let u_spline = splined.isotropic_twobody_energy(rsq);
+            let rel_err = if u_exact.abs() > 1e-10 {
+                ((u_spline - u_exact) / u_exact).abs()
+            } else {
+                (u_spline - u_exact).abs()
+            };
+
+            if r > 3.0 {
+                // Beyond sigma
+                assert!(
+                    rel_err < 0.02 || (u_spline - u_exact).abs() < 1e-5,
+                    "PowerLaw2 large error at r={}: rel_err={}",
+                    r,
+                    rel_err
+                );
+            }
+        }
+
+        // No sign reversal at short range
+        for i in 0..9000 {
+            let r = 0.1 + (i as f64) * 0.0001;
+            let rsq = r * r;
+            if rsq < rsq_min {
+                continue;
+            }
+
+            let u_exact = combined.isotropic_twobody_energy(rsq);
+            let u_spline = splined.isotropic_twobody_energy(rsq);
+
+            if u_exact > 0.0 {
+                assert!(
+                    u_spline > 0.0,
+                    "PowerLaw2 sign reversal at r={:.4} Å: exact={:.3e}, spline={:.3e}",
+                    r,
+                    u_exact,
+                    u_spline
+                );
+            }
+        }
     }
 }
