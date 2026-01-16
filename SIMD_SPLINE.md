@@ -11,21 +11,21 @@ on wide-SIMD architectures with FMA support.
 
 ## Benchmark Results (Apple M4)
 
+Using AshbaughHatch+Yukawa potential (truncated-shifted LJ with hydrophobicity scaling + screened electrostatics).
+
 ### Single Evaluation
-| Potential | Time | Notes |
-|-----------|------|-------|
-| LJ analytical | 708 ps | Baseline |
-| LJ+Yukawa analytical | 2.15 ns | 3x slower (sqrt + exp) |
-| LJ splined | 1.07 ns | |
-| LJ+Yukawa splined | 1.07 ns | Same cost as LJ splined |
+| Method | Time | Speedup |
+|--------|------|---------|
+| AH+Yukawa analytical | 2.23 ns | baseline |
+| AH+Yukawa splined (scalar) | 1.04 ns | **2.1×** |
+| AH+Yukawa splined SIMD (×4) | 5.12 ns (1.28 ns/eval) | 0.8× (slower) |
 
 ### Batch Evaluation (10,000 pairs)
 | Method | Time | Per-pair | vs Analytical |
 |--------|------|----------|---------------|
-| LJ analytical | 5.4 µs | 540 ps | baseline |
-| LJ+Yukawa analytical | 20.4 µs | 2.04 ns | baseline |
-| LJ+Yukawa splined scalar | **9.7 µs** | 970 ps | **2.1x faster** |
-| LJ+Yukawa splined SIMD (wide) | 18.4 µs | 1.84 ns | slower than scalar |
+| AH+Yukawa analytical | 20.4 µs | 2.04 ns | baseline |
+| AH+Yukawa splined scalar | **9.7 µs** | 970 ps | **2.1× faster** |
+| AH+Yukawa splined SIMD | 18.4 µs | 1.84 ns | slower than scalar |
 
 ## Why SIMD Table Lookup is Slow
 
@@ -47,6 +47,31 @@ let c = &self.coeffs[i];               // Scattered memory access
 
 Each SIMD lane may access a different table index, requiring 4-8 separate memory loads
 even with Structure-of-Arrays (SoA) layout.
+
+## AMD Ryzen Considerations
+
+AMD Zen architectures have characteristics that affect SIMD table lookup performance:
+
+**Zen 1-3 (Ryzen 1000-5000 series):**
+- 128-bit internal execution units; 256-bit AVX2 ops are split into two µops
+- `vgatherdpd` still costs ~20 cycles (similar to Intel)
+- The narrower internal width means less penalty for non-vectorized code
+- GROMACS notes that Zen's 128-bit units can make tables competitive with analytical
+
+**Zen 4+ (Ryzen 7000+ series):**
+- Native 256-bit AVX-512 support with improved gather (~8-12 cycles)
+- Better suited for SIMD table lookups than earlier Zen
+- Still unlikely to beat scalar spline for small tables that fit in L1/L2
+
+**Expected Ryzen performance:**
+| Architecture | SIMD Table Lookup | Recommendation |
+|--------------|-------------------|----------------|
+| Zen 1-3 | Marginal benefit possible | Test both, likely similar |
+| Zen 4+ | May match or beat scalar | Worth enabling SIMD path |
+
+The key insight is that AMD's historically narrower SIMD units made the gather penalty
+relatively less severe compared to Intel's wide units. However, scalar spline evaluation
+remains competitive because it avoids the gather entirely.
 
 ## GROMACS Approach
 
@@ -97,7 +122,8 @@ Reference: [LAMMPS pair_style table](https://docs.lammps.org/pair_table.html)
 ## When to Use Splined Potentials
 
 **Good candidates:**
-- Complex potentials (LJ + Yukawa, many-term expansions)
+- Complex potentials (AshbaughHatch+Yukawa, many-term expansions)
+- Coarse-grained protein models with multiple interaction terms
 - User-defined arbitrary potentials
 - GPU execution (texture cache efficient for scattered reads)
 - Potentials requiring expensive transcendentals (exp, erfc)
@@ -115,10 +141,12 @@ The `SplinedPotential` provides:
 
 ```rust
 // Recommended usage for complex potentials:
-let potential = LJYukawa::new(epsilon, sigma, yukawa_a, yukawa_b);
-let splined = SplinedPotential::with_cutoff(&potential, cutoff, SplineConfig::default());
+let lj = LennardJones::new(epsilon, sigma);
+let ah = AshbaughHatch::new(lj, lambda, cutoff);
+// Wrap with additional Yukawa term if needed...
+let splined = SplinedPotential::new(&ah, SplineConfig::default());
 
-// In inner loop - 2x faster than analytical for LJ+Yukawa
+// In inner loop - 2x faster than analytical for complex potentials
 let energy = splined.isotropic_twobody_energy(rsq);
 ```
 
