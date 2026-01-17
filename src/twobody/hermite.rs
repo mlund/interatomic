@@ -195,6 +195,10 @@ pub struct SplinedPotential {
     force_shift: f64,
     /// Original cutoff distance
     cutoff: f64,
+    /// Energy at r_min (for linear extrapolation below r_min)
+    u_at_rmin: f64,
+    /// Force at r_min (for linear extrapolation below r_min)
+    f_at_rmin: f64,
 }
 
 impl SplinedPotential {
@@ -418,6 +422,15 @@ impl SplinedPotential {
         let coeffs =
             Self::compute_cubic_hermite_coeffs(&rsq_vals, &u_vals, &f_vals, config.grid_type);
 
+        // Compute energy and force at r_min for linear extrapolation below r_min
+        // These are used when r < r_min to maintain repulsive behavior
+        let mut u_at_rmin = potential.isotropic_twobody_energy(rsq_min) - energy_shift;
+        let mut f_at_rmin = potential.isotropic_twobody_force(rsq_min);
+        if config.shift_force {
+            u_at_rmin -= (r_min - r_max) * force_shift;
+            f_at_rmin -= force_shift;
+        }
+
         Self {
             coeffs,
             grid_type: config.grid_type,
@@ -429,6 +442,8 @@ impl SplinedPotential {
             energy_shift,
             force_shift,
             cutoff,
+            u_at_rmin,
+            f_at_rmin,
         }
     }
 
@@ -776,7 +791,8 @@ impl Cutoff for SplinedPotential {
 impl IsotropicTwobodyEnergy for SplinedPotential {
     /// Evaluate energy at squared distance using cubic spline interpolation.
     ///
-    /// Returns 0.0 if rsq >= cutoff².
+    /// Returns 0.0 if rsq >= cutoff². For rsq < rsq_min, linearly extrapolates
+    /// using the slope at r_min to maintain repulsive behavior.
     #[inline]
     fn isotropic_twobody_energy(&self, distance_squared: f64) -> f64 {
         let rsq_max = self.r_max * self.r_max;
@@ -787,6 +803,12 @@ impl IsotropicTwobodyEnergy for SplinedPotential {
         }
 
         let rsq_min = self.r_min * self.r_min;
+        let r = distance_squared.sqrt();
+
+        // Linear extrapolation correction for r < r_min (branchless)
+        // U(r) = U(r_min) + F(r_min) * (r_min - r) for r < r_min
+        // This adds a repulsive linear wall below r_min
+        let extrap_dist = (self.r_min - r).max(0.0);
 
         // Compute index and fractional part based on grid type
         let (i, eps) = match self.grid_type {
@@ -800,17 +822,17 @@ impl IsotropicTwobodyEnergy for SplinedPotential {
             }
             GridType::UniformR => {
                 // Uniform in r space
-                let r = distance_squared.sqrt().max(self.r_min);
-                let t = (r - self.r_min) * self.inv_delta;
+                let r_clamped = r.max(self.r_min);
+                let t = (r_clamped - self.r_min) * self.inv_delta;
                 let i = (t as usize).min(self.n - 2);
                 let eps = t - i as f64;
                 (i, eps)
             }
             GridType::PowerLaw(p) => {
                 // Inverse mapping: x = ((r - r_min) / (r_max - r_min))^(1/p)
-                let r = distance_squared.sqrt().max(self.r_min);
+                let r_clamped = r.max(self.r_min);
                 let r_range = self.r_max - self.r_min;
-                let x = ((r - self.r_min) / r_range).powf(1.0 / p);
+                let x = ((r_clamped - self.r_min) / r_range).powf(1.0 / p);
                 let t = x * (self.n - 1) as f64;
                 let i = (t as usize).min(self.n - 2);
                 let eps = t - i as f64;
@@ -818,9 +840,9 @@ impl IsotropicTwobodyEnergy for SplinedPotential {
             }
             GridType::PowerLaw2 => {
                 // Optimized p=2: x = sqrt((r - r_min) / (r_max - r_min))
-                let r = distance_squared.sqrt().max(self.r_min);
+                let r_clamped = r.max(self.r_min);
                 let r_range = self.r_max - self.r_min;
-                let x = ((r - self.r_min) / r_range).sqrt(); // sqrt instead of powf(0.5)
+                let x = ((r_clamped - self.r_min) / r_range).sqrt(); // sqrt instead of powf(0.5)
                 let t = x * (self.n - 1) as f64;
                 let i = (t as usize).min(self.n - 2);
                 let eps = t - i as f64;
@@ -841,12 +863,17 @@ impl IsotropicTwobodyEnergy for SplinedPotential {
 
         // Horner's method for polynomial evaluation
         let c = &self.coeffs[i];
-        c.u[0] + eps * (c.u[1] + eps * (c.u[2] + eps * c.u[3]))
+        let u_spline = c.u[0] + eps * (c.u[1] + eps * (c.u[2] + eps * c.u[3]));
+
+        // Add linear extrapolation for r < r_min (branchless)
+        // extrap_dist is 0 when r >= r_min, so this adds nothing in the normal case
+        u_spline + self.f_at_rmin * extrap_dist
     }
 
     /// Evaluate force at squared distance using cubic spline interpolation.
     ///
-    /// Returns 0.0 if rsq >= cutoff².
+    /// Returns 0.0 if rsq >= cutoff². For rsq < rsq_min, returns F(r_min)
+    /// (constant force corresponding to linear energy extrapolation).
     #[inline]
     fn isotropic_twobody_force(&self, distance_squared: f64) -> f64 {
         let rsq_max = self.r_max * self.r_max;
@@ -1022,6 +1049,8 @@ pub struct SplineTableSimd {
     inv_delta: f64,
     n: usize,
     grid_type: GridType,
+    /// Force at r_min for linear extrapolation
+    f_at_rmin: f64,
 }
 
 impl SplineTableSimd {
@@ -1062,10 +1091,12 @@ impl SplineTableSimd {
             inv_delta: spline.inv_delta,
             n: spline.n,
             grid_type: spline.grid_type,
+            f_at_rmin: spline.f_at_rmin,
         }
     }
 
     /// Evaluate energy for a single distance (scalar fallback).
+    /// Linearly extrapolates below r_min to maintain repulsive behavior.
     #[inline]
     pub fn energy(&self, rsq: f64) -> f64 {
         let rsq_max = self.r_max * self.r_max;
@@ -1073,35 +1104,40 @@ impl SplineTableSimd {
             return 0.0;
         }
 
+        let r = rsq.sqrt();
+
+        // Linear extrapolation distance (0 if r >= r_min)
+        let extrap_dist = (self.r_min - r).max(0.0);
+
         let (i, eps) = match self.grid_type {
             GridType::UniformRsq => {
                 let rsq_min = self.r_min * self.r_min;
-                let rsq = rsq.max(rsq_min);
-                let t = (rsq - rsq_min) * self.inv_delta;
+                let rsq_clamped = rsq.max(rsq_min);
+                let t = (rsq_clamped - rsq_min) * self.inv_delta;
                 let i = (t as usize).min(self.n - 2);
                 let eps = t - i as f64;
                 (i, eps)
             }
             GridType::UniformR => {
-                let r = rsq.sqrt().max(self.r_min);
-                let t = (r - self.r_min) * self.inv_delta;
+                let r_clamped = r.max(self.r_min);
+                let t = (r_clamped - self.r_min) * self.inv_delta;
                 let i = (t as usize).min(self.n - 2);
                 let eps = t - i as f64;
                 (i, eps)
             }
             GridType::PowerLaw(p) => {
-                let r = rsq.sqrt().max(self.r_min);
+                let r_clamped = r.max(self.r_min);
                 let r_range = self.r_max - self.r_min;
-                let x = ((r - self.r_min) / r_range).powf(1.0 / p);
+                let x = ((r_clamped - self.r_min) / r_range).powf(1.0 / p);
                 let t = x * (self.n - 1) as f64;
                 let i = (t as usize).min(self.n - 2);
                 let eps = t - i as f64;
                 (i, eps)
             }
             GridType::PowerLaw2 => {
-                let r = rsq.sqrt().max(self.r_min);
+                let r_clamped = r.max(self.r_min);
                 let r_range = self.r_max - self.r_min;
-                let x = ((r - self.r_min) / r_range).sqrt();
+                let x = ((r_clamped - self.r_min) / r_range).sqrt();
                 let t = x * (self.n - 1) as f64;
                 let i = (t as usize).min(self.n - 2);
                 let eps = t - i as f64;
@@ -1120,17 +1156,33 @@ impl SplineTableSimd {
             }
         };
 
-        // Horner's method
-        self.u0[i] + eps * (self.u1[i] + eps * (self.u2[i] + eps * self.u3[i]))
+        // Horner's method + linear extrapolation
+        let u_spline = self.u0[i] + eps * (self.u1[i] + eps * (self.u2[i] + eps * self.u3[i]));
+        u_spline + self.f_at_rmin * extrap_dist
     }
 
     /// Evaluate energies for 4 distances using SIMD (f64x4).
     ///
     /// This is the core SIMD kernel - evaluates 4 spline lookups in parallel.
+    /// Linearly extrapolates below r_min to maintain repulsive behavior.
     /// Note: For UniformR and PowerLaw grids, this requires sqrt/powf which may reduce SIMD benefits.
     #[inline]
     pub fn energy_x4(&self, rsq: f64x4) -> f64x4 {
         let rsq_max = f64x4::splat(self.r_max * self.r_max);
+        let r_min_v = f64x4::splat(self.r_min);
+        let zero = f64x4::ZERO;
+
+        // Compute r for extrapolation (need sqrt for all grid types here)
+        let rsq_arr: [f64; 4] = rsq.into();
+        let r = f64x4::from([
+            rsq_arr[0].sqrt(),
+            rsq_arr[1].sqrt(),
+            rsq_arr[2].sqrt(),
+            rsq_arr[3].sqrt(),
+        ]);
+
+        // Linear extrapolation distance (0 if r >= r_min)
+        let extrap_dist = (r_min_v - r).max(zero);
 
         // Compute t values based on grid type
         let t = match self.grid_type {
@@ -1248,9 +1300,13 @@ impl SplineTableSimd {
         let c3 = f64x4::from([self.u3[i0], self.u3[i1], self.u3[i2], self.u3[i3]]);
 
         // Horner's method: c0 + eps*(c1 + eps*(c2 + eps*c3))
-        let result = c3.mul_add(eps, c2);
-        let result = result.mul_add(eps, c1);
-        let result = result.mul_add(eps, c0);
+        let u_spline = c3.mul_add(eps, c2);
+        let u_spline = u_spline.mul_add(eps, c1);
+        let u_spline = u_spline.mul_add(eps, c0);
+
+        // Add linear extrapolation for r < r_min
+        let f_at_rmin_v = f64x4::splat(self.f_at_rmin);
+        let result = f_at_rmin_v.mul_add(extrap_dist, u_spline);
 
         // Zero out values beyond cutoff
         let mask = rsq.cmp_lt(rsq_max);
@@ -2406,5 +2462,179 @@ mod tests {
 
         let rel_err = ((f_spline - f_exact) / f_exact).abs();
         assert!(rel_err < 1e-2, "InverseRsq force error: {}", rel_err);
+    }
+
+    // ============================================================================
+    // Linear extrapolation tests
+    // ============================================================================
+
+    /// Test that energy increases linearly below r_min (not flat).
+    #[test]
+    fn test_linear_extrapolation_below_rmin() {
+        let lj = LennardJones::new(1.0, 1.0);
+        let cutoff = 2.5;
+        let rsq_min = 0.64; // r_min = 0.8σ
+
+        let splined = SplinedPotential::with_cutoff(
+            &lj,
+            cutoff,
+            SplineConfig::default().with_rsq_min(rsq_min),
+        );
+
+        // Get values at r_min
+        let u_at_rmin = splined.isotropic_twobody_energy(rsq_min);
+        let f_at_rmin = splined.f_at_rmin;
+
+        println!("\n=== Linear Extrapolation Test ===");
+        println!("r_min = {:.3}, rsq_min = {:.3}", rsq_min.sqrt(), rsq_min);
+        println!("U(r_min) = {:.6e}", u_at_rmin);
+        println!("F(r_min) = {:.6e}", f_at_rmin);
+
+        // Test at distances below r_min
+        let test_rsq: [f64; 4] = [0.49, 0.36, 0.25, 0.16]; // r = 0.7, 0.6, 0.5, 0.4
+        println!(
+            "\n{:>8} {:>12} {:>12} {:>12}",
+            "r", "U_spline", "U_expected", "diff"
+        );
+
+        for &rsq in &test_rsq {
+            let r = rsq.sqrt();
+            let r_min = rsq_min.sqrt();
+
+            // Expected: U(r) = U(r_min) + F(r_min) * (r_min - r)
+            let delta_r = r_min - r;
+            let u_expected = u_at_rmin + f_at_rmin * delta_r;
+            let u_spline = splined.isotropic_twobody_energy(rsq);
+
+            let diff = (u_spline - u_expected).abs();
+            println!(
+                "{:>8.3} {:>12.4e} {:>12.4e} {:>12.4e}",
+                r, u_spline, u_expected, diff
+            );
+
+            // Should match exactly (within floating point precision)
+            assert!(
+                diff < 1e-10,
+                "Linear extrapolation mismatch at r={}: got {}, expected {}",
+                r,
+                u_spline,
+                u_expected
+            );
+
+            // Energy should increase as r decreases (repulsive)
+            assert!(
+                u_spline > u_at_rmin,
+                "Energy should increase below r_min: U({}) = {} <= U(r_min) = {}",
+                r,
+                u_spline,
+                u_at_rmin
+            );
+        }
+    }
+
+    /// Test that force is constant (F(r_min)) below r_min.
+    #[test]
+    fn test_force_constant_below_rmin() {
+        let lj = LennardJones::new(1.0, 1.0);
+        let cutoff = 2.5;
+        let rsq_min = 0.64; // r_min = 0.8σ
+
+        let splined = SplinedPotential::with_cutoff(
+            &lj,
+            cutoff,
+            SplineConfig::default().with_rsq_min(rsq_min),
+        );
+
+        let f_at_rmin = splined.isotropic_twobody_force(rsq_min);
+
+        // Force should be constant (equal to F(r_min)) for all r < r_min
+        let test_rsq: [f64; 4] = [0.49, 0.36, 0.25, 0.16];
+        for &rsq in &test_rsq {
+            let f = splined.isotropic_twobody_force(rsq);
+            let diff = (f - f_at_rmin).abs();
+            assert!(
+                diff < 1e-10,
+                "Force should be constant below r_min: F({}) = {}, F(r_min) = {}",
+                rsq.sqrt(),
+                f,
+                f_at_rmin
+            );
+        }
+    }
+
+    /// Test that SIMD extrapolation matches scalar.
+    #[test]
+    fn test_simd_extrapolation_matches_scalar() {
+        let lj = LennardJones::new(1.0, 1.0);
+        let cutoff = 2.5;
+        let rsq_min = 0.64;
+
+        let splined = SplinedPotential::with_cutoff(
+            &lj,
+            cutoff,
+            SplineConfig::default().with_rsq_min(rsq_min),
+        );
+        let simd = splined.to_simd();
+
+        // Test with values both above and below r_min
+        let distances: [f64; 8] = [0.16, 0.36, 0.49, 0.64, 1.0, 2.0, 4.0, 6.0]; // Mix of below and above r_min
+
+        let scalar: Vec<f64> = distances
+            .iter()
+            .map(|&rsq| splined.isotropic_twobody_energy(rsq))
+            .collect();
+
+        let mut simd_out = vec![0.0; 8];
+        simd.energies_batch_simd(&distances, &mut simd_out);
+
+        for i in 0..8 {
+            let diff = (scalar[i] - simd_out[i]).abs();
+            assert!(
+                diff < 1e-10,
+                "SIMD/scalar mismatch at rsq={}: scalar={}, simd={}",
+                distances[i],
+                scalar[i],
+                simd_out[i]
+            );
+        }
+    }
+
+    /// Test extrapolation with InverseRsq grid.
+    #[test]
+    fn test_inversersq_extrapolation() {
+        let lj = LennardJones::new(1.0, 1.0);
+        let cutoff = 2.5;
+        let rsq_min = 0.64;
+
+        let splined = SplinedPotential::with_cutoff(
+            &lj,
+            cutoff,
+            SplineConfig::default()
+                .with_rsq_min(rsq_min)
+                .with_grid_type(GridType::InverseRsq),
+        );
+
+        let u_at_rmin = splined.isotropic_twobody_energy(rsq_min);
+
+        // Test below r_min - energy should increase
+        let rsq_below = 0.36; // r = 0.6
+        let u_below = splined.isotropic_twobody_energy(rsq_below);
+
+        assert!(
+            u_below > u_at_rmin,
+            "InverseRsq: Energy should increase below r_min"
+        );
+
+        // Verify linear relationship
+        let r = rsq_below.sqrt();
+        let r_min = rsq_min.sqrt();
+        let expected = u_at_rmin + splined.f_at_rmin * (r_min - r);
+        let diff = (u_below - expected).abs();
+        assert!(
+            diff < 1e-10,
+            "InverseRsq linear extrapolation mismatch: got {}, expected {}",
+            u_below,
+            expected
+        );
     }
 }
