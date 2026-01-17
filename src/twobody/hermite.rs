@@ -86,6 +86,11 @@ pub enum GridType {
     /// Equivalent to `PowerLaw(2.0)` but faster.
     #[default]
     PowerLaw2,
+    /// Uniform spacing in 1/r² (inverse squared distance).
+    /// Transforms LJ potential to polynomial form: U ∝ w⁶ - w³ where w = 1/r².
+    /// Gives dense sampling at short range with O(1) lookup using only division.
+    /// Recommended for steep potentials when sqrt is expensive.
+    InverseRsq,
 }
 
 /// Configuration for spline table construction
@@ -372,6 +377,38 @@ impl SplinedPotential {
                 // Store p=2.0 in delta field for use in evaluation
                 (2.0, rsq_vals, u_vals, f_vals)
             }
+            GridType::InverseRsq => {
+                // Uniform grid in w = 1/rsq space (inverse squared distance).
+                // This transforms LJ to polynomial form: U ∝ w⁶ - w³
+                // w_min = 1/rsq_max (long range), w_max = 1/rsq_min (short range)
+                let w_min = 1.0 / rsq_max;
+                let w_max = 1.0 / rsq_min;
+                let delta_w = (w_max - w_min) / (n - 1) as f64;
+
+                let mut rsq_vals = Vec::with_capacity(n);
+                let mut u_vals = Vec::with_capacity(n);
+                let mut f_vals = Vec::with_capacity(n);
+
+                for i in 0..n {
+                    let w = w_min + i as f64 * delta_w;
+                    let rsq = 1.0 / w;
+                    let r = rsq.sqrt();
+                    rsq_vals.push(rsq);
+
+                    let mut u = potential.isotropic_twobody_energy(rsq) - energy_shift;
+                    let mut f = potential.isotropic_twobody_force(rsq);
+
+                    if config.shift_force {
+                        u -= (r - r_max) * force_shift;
+                        f -= force_shift;
+                    }
+
+                    u_vals.push(u);
+                    f_vals.push(f);
+                }
+                // Store delta_w for use in evaluation
+                (delta_w, rsq_vals, u_vals, f_vals)
+            }
         };
 
         let inv_delta = 1.0 / delta;
@@ -590,6 +627,45 @@ impl SplinedPotential {
 
                     (a0, a1, a2, a3, b0, b1, b2, b3)
                 }
+                GridType::InverseRsq => {
+                    // Polynomial in w-space where w = 1/rsq
+                    // Grid is uniform in w with Δw computed from rsq values
+                    let w_i = 1.0 / rsq[i];
+                    let w_i1 = 1.0 / rsq[i + 1];
+                    let delta_w = w_i1 - w_i; // Note: w increases as rsq decreases
+
+                    // dU/dw = dU/dr * dr/dw
+                    // r = rsq^(1/2) = w^(-1/2), so dr/dw = -1/(2*w^(3/2)) = -r³/2
+                    // Since dU/dr = -F: dU/dw = -F * (-r³/2) = F * r³ / 2
+                    let dudw_i = f_i * r_i * r_i * r_i / 2.0;
+                    let dudw_i1 = f_i1 * r_i1 * r_i1 * r_i1 / 2.0;
+
+                    let a0 = u_i;
+                    let a1 = delta_w * dudw_i;
+                    let a2 = 3.0 * (u_i1 - u_i) - delta_w * (2.0 * dudw_i + dudw_i1);
+                    let a3 = 2.0 * (u_i - u_i1) + delta_w * (dudw_i + dudw_i1);
+
+                    // df/dw using finite differences in w-space
+                    let dfdw_i = if i > 0 {
+                        let w_prev = 1.0 / rsq[i - 1];
+                        (f_i1 - f[i - 1]) / (w_i1 - w_prev)
+                    } else {
+                        (f_i1 - f_i) / delta_w
+                    };
+                    let dfdw_i1 = if i + 2 < n {
+                        let w_next = 1.0 / rsq[i + 2];
+                        (f[i + 2] - f_i) / (w_next - w_i)
+                    } else {
+                        (f_i1 - f_i) / delta_w
+                    };
+
+                    let b0 = f_i;
+                    let b1 = delta_w * dfdw_i;
+                    let b2 = 3.0 * (f_i1 - f_i) - delta_w * (2.0 * dfdw_i + dfdw_i1);
+                    let b3 = 2.0 * (f_i - f_i1) + delta_w * (dfdw_i + dfdw_i1);
+
+                    (a0, a1, a2, a3, b0, b1, b2, b3)
+                }
             };
 
             coeffs.push(SplineCoeffs {
@@ -750,6 +826,17 @@ impl IsotropicTwobodyEnergy for SplinedPotential {
                 let eps = t - i as f64;
                 (i, eps)
             }
+            GridType::InverseRsq => {
+                // w = 1/rsq, uniform grid in w-space
+                // w_min = 1/rsq_max, delta stored in self.delta
+                let rsq = distance_squared.max(rsq_min).min(rsq_max);
+                let w = 1.0 / rsq;
+                let w_min = 1.0 / rsq_max;
+                let t = (w - w_min) * self.inv_delta;
+                let i = (t as usize).min(self.n - 2);
+                let eps = t - i as f64;
+                (i, eps)
+            }
         };
 
         // Horner's method for polynomial evaluation
@@ -799,6 +886,16 @@ impl IsotropicTwobodyEnergy for SplinedPotential {
                 let r_range = self.r_max - self.r_min;
                 let x = ((r - self.r_min) / r_range).sqrt();
                 let t = x * (self.n - 1) as f64;
+                let i = (t as usize).min(self.n - 2);
+                let eps = t - i as f64;
+                (i, eps)
+            }
+            GridType::InverseRsq => {
+                // w = 1/rsq, uniform grid in w-space
+                let rsq = distance_squared.max(rsq_min).min(rsq_max);
+                let w = 1.0 / rsq;
+                let w_min = 1.0 / rsq_max;
+                let t = (w - w_min) * self.inv_delta;
                 let i = (t as usize).min(self.n - 2);
                 let eps = t - i as f64;
                 (i, eps)
@@ -1010,6 +1107,17 @@ impl SplineTableSimd {
                 let eps = t - i as f64;
                 (i, eps)
             }
+            GridType::InverseRsq => {
+                let rsq_min = self.r_min * self.r_min;
+                let rsq_max = self.r_max * self.r_max;
+                let rsq_clamped = rsq.max(rsq_min).min(rsq_max);
+                let w = 1.0 / rsq_clamped;
+                let w_min = 1.0 / rsq_max;
+                let t = (w - w_min) * self.inv_delta;
+                let i = (t as usize).min(self.n - 2);
+                let eps = t - i as f64;
+                (i, eps)
+            }
         };
 
         // Horner's method
@@ -1097,6 +1205,24 @@ impl SplineTableSimd {
                         ((r - self.r_min) / r_range).sqrt() * n_minus_1
                     },
                 ])
+            }
+            GridType::InverseRsq => {
+                // w = 1/rsq, t = (w - w_min) * inv_delta
+                // This only requires division, no sqrt!
+                let rsq_min = self.r_min * self.r_min;
+                let rsq_max = self.r_max * self.r_max;
+                let w_min = 1.0 / rsq_max;
+                let inv_delta = f64x4::splat(self.inv_delta);
+                let w_min_v = f64x4::splat(w_min);
+                let rsq_min_v = f64x4::splat(rsq_min);
+                let rsq_max_v = f64x4::splat(rsq_max);
+
+                // Clamp rsq and compute w = 1/rsq
+                let rsq_clamped = rsq.max(rsq_min_v).min(rsq_max_v);
+                let one = f64x4::splat(1.0);
+                let w = one / rsq_clamped;
+
+                (w - w_min_v) * inv_delta
             }
         };
 
@@ -1365,6 +1491,10 @@ mod tests {
             GridType::PowerLaw2 => {
                 println!("Grid type: PowerLaw2 (p = 2, optimized)");
                 println!("Mapping: r(x) = r_min + (r_max - r_min) * x², denser at short range");
+            }
+            GridType::InverseRsq => {
+                println!("Grid type: InverseRsq (constant Δw = {:.6e})", delta);
+                println!("Mapping: w = 1/rsq, uniform grid in w-space, denser at short range");
             }
         }
 
@@ -1970,5 +2100,311 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ============================================================================
+    // InverseRsq grid tests
+    // ============================================================================
+
+    /// Test InverseRsq grid with pure LJ potential (its ideal use case).
+    ///
+    /// InverseRsq transforms LJ to polynomial form (U ∝ w⁶ - w³ where w = 1/r²),
+    /// making it ideal for steep short-range potentials with moderate cutoffs.
+    /// For long-range potentials (Yukawa, Coulomb), use PowerLaw2 instead.
+    #[test]
+    fn test_inversersq_pure_lj() {
+        let lj = LennardJones::new(1.0, 1.0);
+        let cutoff = 3.0; // Typical LJ cutoff
+
+        let rsq_min = 0.5; // Start above the steep repulsive region
+        let splined = SplinedPotential::with_cutoff(
+            &lj,
+            cutoff,
+            SplineConfig::default()
+                .with_rsq_min(rsq_min)
+                .with_grid_type(GridType::InverseRsq),
+        );
+
+        println!("\n=== InverseRsq Grid Test (Pure LJ) ===");
+        let stats = splined.stats();
+        println!("grid_type: {:?}", stats.grid_type);
+        println!("n_points: {}", stats.n_points);
+
+        // Test accuracy at various distances
+        // Note: Near r=σ=1, U≈0 so relative error is misleading; use absolute error there
+        let test_distances = [0.8, 1.0, 1.122, 1.5, 2.0, 2.5];
+        println!(
+            "\n{:>8} {:>15} {:>15} {:>12} {:>12}",
+            "r (σ)", "u_exact", "u_spline", "rel_err", "abs_err"
+        );
+
+        for &r in &test_distances {
+            let rsq = r * r;
+            if rsq < rsq_min {
+                continue;
+            }
+            let u_exact = lj.isotropic_twobody_energy(rsq) - splined.energy_shift;
+            let u_spline = splined.isotropic_twobody_energy(rsq);
+            let abs_err = (u_spline - u_exact).abs();
+            let rel_err = if u_exact.abs() > 0.1 {
+                abs_err / u_exact.abs()
+            } else {
+                0.0 // Near zero, relative error is meaningless
+            };
+
+            println!(
+                "{:>8.3} {:>15.6e} {:>15.6e} {:>12.2e} {:>12.2e}",
+                r, u_exact, u_spline, rel_err, abs_err
+            );
+
+            // Use relative error when |u| > 0.1, absolute error otherwise
+            if u_exact.abs() > 0.1 {
+                assert!(
+                    rel_err < 0.01,
+                    "InverseRsq relative error at r={}: rel_err={}",
+                    r,
+                    rel_err
+                );
+            } else {
+                // Near zero crossing, accept small absolute errors
+                assert!(
+                    abs_err < 0.01,
+                    "InverseRsq absolute error at r={}: abs_err={}",
+                    r,
+                    abs_err
+                );
+            }
+        }
+
+        // Validation
+        let validation = splined.validate(&lj, 1000);
+        println!("\nMax energy error: {:.6e}", validation.max_energy_error);
+        println!("Max force error: {:.6e}", validation.max_force_error);
+    }
+
+    /// Compare InverseRsq vs PowerLaw2 for short-range LJ accuracy.
+    #[test]
+    fn test_inversersq_vs_powerlaw2_comparison() {
+        let lj = LennardJones::new(1.0, 1.0);
+        let cutoff = 2.5;
+        let rsq_min = 0.64; // r_min = 0.8σ
+        let n_points = 500; // Use fewer points to see differences
+
+        let config_inv = SplineConfig {
+            n_points,
+            rsq_min: Some(rsq_min),
+            grid_type: GridType::InverseRsq,
+            ..Default::default()
+        };
+        let config_pl2 = SplineConfig {
+            n_points,
+            rsq_min: Some(rsq_min),
+            grid_type: GridType::PowerLaw2,
+            ..Default::default()
+        };
+
+        let splined_inv = SplinedPotential::with_cutoff(&lj, cutoff, config_inv);
+        let splined_pl2 = SplinedPotential::with_cutoff(&lj, cutoff, config_pl2);
+
+        println!("\n=== InverseRsq vs PowerLaw2 Comparison (LJ, {} points) ===", n_points);
+        println!(
+            "\n{:>6} {:>12} {:>12} {:>12}",
+            "r", "err_InvRsq", "err_PL2", "better"
+        );
+
+        let mut inv_wins = 0;
+        let mut pl2_wins = 0;
+
+        for i in 0..20 {
+            let r = 0.85 + i as f64 * 0.08;
+            let rsq = r * r;
+            if rsq < rsq_min || rsq > cutoff * cutoff {
+                continue;
+            }
+
+            let u_exact = lj.isotropic_twobody_energy(rsq);
+            let u_inv = splined_inv.isotropic_twobody_energy(rsq);
+            let u_pl2 = splined_pl2.isotropic_twobody_energy(rsq);
+
+            let err_inv = ((u_inv - u_exact + splined_inv.energy_shift) / u_exact).abs();
+            let err_pl2 = ((u_pl2 - u_exact + splined_pl2.energy_shift) / u_exact).abs();
+
+            let better = if err_inv < err_pl2 {
+                inv_wins += 1;
+                "InvRsq"
+            } else {
+                pl2_wins += 1;
+                "PL2"
+            };
+
+            println!(
+                "{:>6.2} {:>12.2e} {:>12.2e} {:>12}",
+                r, err_inv, err_pl2, better
+            );
+        }
+
+        println!("\nInverseRsq wins: {}, PowerLaw2 wins: {}", inv_wins, pl2_wins);
+        println!("Note: InverseRsq should excel at short range (r < 1.5σ)");
+    }
+
+    /// Test that InverseRsq has no sign reversal at short range.
+    #[test]
+    fn test_inversersq_no_sign_reversal_lj() {
+        let lj = LennardJones::new(1.0, 1.0);
+        let cutoff = 2.5;
+        let rsq_min = 0.01;
+
+        let splined = SplinedPotential::with_cutoff(
+            &lj,
+            cutoff,
+            SplineConfig::default()
+                .with_rsq_min(rsq_min)
+                .with_grid_type(GridType::InverseRsq),
+        );
+
+        // Scan repulsive region
+        for i in 0..4000 {
+            let r = 0.1 + (i as f64) * 0.0001;
+            let rsq = r * r;
+            if rsq < rsq_min {
+                continue;
+            }
+
+            let u_exact = lj.isotropic_twobody_energy(rsq);
+            let u_spline = splined.isotropic_twobody_energy(rsq);
+
+            if u_exact > 0.0 {
+                assert!(
+                    u_spline > 0.0,
+                    "InverseRsq sign reversal at r={:.4}: exact={:.3e}, spline={:.3e}",
+                    r,
+                    u_exact,
+                    u_spline
+                );
+            }
+        }
+    }
+
+    /// Test that InverseRsq has no sign reversal for AH+Yukawa.
+    #[test]
+    fn test_inversersq_no_sign_reversal_ah_yukawa() {
+        let lj = LennardJones::new(0.8, 3.0);
+        let ah = AshbaughHatch::new(lj, 0.5, 100.0);
+        let yukawa = IonIon::new(
+            1.0,
+            ConstantPermittivity::new(80.0),
+            Yukawa::new(100.0, Some(50.0)),
+        );
+        let combined = Combined::new(ah, yukawa);
+
+        let rsq_min = 0.01;
+        let splined = SplinedPotential::with_cutoff(
+            &combined,
+            100.0,
+            SplineConfig::high_accuracy()
+                .with_rsq_min(rsq_min)
+                .with_grid_type(GridType::InverseRsq),
+        );
+
+        // Scan from r=0.1 to r=1.0 Å
+        for i in 0..9000 {
+            let r = 0.1 + (i as f64) * 0.0001;
+            let rsq = r * r;
+            if rsq < rsq_min {
+                continue;
+            }
+
+            let u_exact = combined.isotropic_twobody_energy(rsq);
+            let u_spline = splined.isotropic_twobody_energy(rsq);
+
+            if u_exact > 0.0 {
+                assert!(
+                    u_spline > 0.0,
+                    "InverseRsq sign reversal at r={:.4} Å: exact={:.3e}, spline={:.3e}",
+                    r,
+                    u_exact,
+                    u_spline
+                );
+            }
+        }
+    }
+
+    /// Test that InverseRsq SIMD matches scalar.
+    #[test]
+    fn test_inversersq_simd_matches_scalar() {
+        let lj = LennardJones::new(1.0, 1.0);
+        let cutoff = 2.5;
+        let splined = SplinedPotential::with_cutoff(
+            &lj,
+            cutoff,
+            SplineConfig::default().with_grid_type(GridType::InverseRsq),
+        );
+        let simd = splined.to_simd();
+
+        let distances: Vec<f64> = (0..100)
+            .map(|i| 1.0 + 0.05 * i as f64)
+            .collect();
+
+        let scalar_sum: f64 = distances
+            .iter()
+            .map(|&r2| splined.isotropic_twobody_energy(r2))
+            .sum();
+
+        let simd_sum = simd.sum_energies_simd(&distances);
+
+        let rel_err = ((scalar_sum - simd_sum) / scalar_sum).abs();
+        assert!(
+            rel_err < 1e-10,
+            "InverseRsq SIMD/scalar mismatch: scalar={}, simd={}, err={}",
+            scalar_sum,
+            simd_sum,
+            rel_err
+        );
+    }
+
+    /// Test InverseRsq basic energy accuracy for LJ.
+    #[test]
+    fn test_inversersq_lj_energy() {
+        let lj = LennardJones::new(1.0, 1.0);
+        let cutoff = 2.5;
+        let splined = SplinedPotential::with_cutoff(
+            &lj,
+            cutoff,
+            SplineConfig::default().with_grid_type(GridType::InverseRsq),
+        );
+
+        // Test at minimum (r = 2^(1/6) σ ≈ 1.122)
+        let r_min = 2.0_f64.powf(1.0 / 6.0);
+        let rsq_min = r_min * r_min;
+
+        let u_spline = splined.isotropic_twobody_energy(rsq_min);
+        let u_exact = lj.isotropic_twobody_energy(rsq_min) - splined.energy_shift;
+
+        let rel_err = ((u_spline - u_exact) / u_exact).abs();
+        assert!(
+            rel_err < 1e-3,
+            "InverseRsq energy error at LJ minimum: {}",
+            rel_err
+        );
+    }
+
+    /// Test InverseRsq force accuracy for LJ.
+    #[test]
+    fn test_inversersq_lj_force() {
+        let lj = LennardJones::new(1.0, 1.0);
+        let cutoff = 2.5;
+        let splined = SplinedPotential::with_cutoff(
+            &lj,
+            cutoff,
+            SplineConfig::default().with_grid_type(GridType::InverseRsq),
+        );
+
+        // Test force at r = 1.5σ
+        let rsq = 2.25;
+        let f_spline = splined.isotropic_twobody_force(rsq);
+        let f_exact = lj.isotropic_twobody_force(rsq);
+
+        let rel_err = ((f_spline - f_exact) / f_exact).abs();
+        assert!(rel_err < 1e-2, "InverseRsq force error: {}", rel_err);
     }
 }
