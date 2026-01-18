@@ -1441,11 +1441,10 @@ impl Debug for SplineTableSimd {
 /// to the f64 version, at the cost of reduced precision.
 #[derive(Clone)]
 pub struct SplineTableSimdF32 {
-    /// Energy coefficients (f32)
-    u0: Vec<f32>,
-    u1: Vec<f32>,
-    u2: Vec<f32>,
-    u3: Vec<f32>,
+    /// Energy coefficients in AoS layout: [u0, u1, u2, u3] per interval.
+    /// This layout provides better cache locality when accessing all 4 coefficients
+    /// for a single interval (common in scalar fallback and gather operations).
+    coeffs: Vec<[f32; 4]>,
     /// Grid parameters
     r_min: f32,
     r_max: f32,
@@ -1457,28 +1456,20 @@ pub struct SplineTableSimdF32 {
 }
 
 impl SplineTableSimdF32 {
-    /// Create f32 SoA layout from f64 SplinedPotential.
+    /// Create f32 AoS layout from f64 SplinedPotential.
     ///
     /// Converts coefficients to single precision for faster evaluation.
+    /// Uses Array-of-Structures layout for better cache locality when
+    /// accessing coefficients for individual intervals.
     pub fn from_spline(spline: &SplinedPotential) -> Self {
-        let n = spline.coeffs.len();
-        let mut u0 = Vec::with_capacity(n);
-        let mut u1 = Vec::with_capacity(n);
-        let mut u2 = Vec::with_capacity(n);
-        let mut u3 = Vec::with_capacity(n);
-
-        for c in &spline.coeffs {
-            u0.push(c.u[0] as f32);
-            u1.push(c.u[1] as f32);
-            u2.push(c.u[2] as f32);
-            u3.push(c.u[3] as f32);
-        }
+        let coeffs: Vec<[f32; 4]> = spline
+            .coeffs
+            .iter()
+            .map(|c| [c.u[0] as f32, c.u[1] as f32, c.u[2] as f32, c.u[3] as f32])
+            .collect();
 
         Self {
-            u0,
-            u1,
-            u2,
-            u3,
+            coeffs,
             r_min: spline.r_min as f32,
             r_max: spline.r_max as f32,
             inv_delta: spline.inv_delta as f32,
@@ -1547,7 +1538,8 @@ impl SplineTableSimdF32 {
             }
         };
 
-        let u_spline = self.u0[i] + eps * (self.u1[i] + eps * (self.u2[i] + eps * self.u3[i]));
+        let c = &self.coeffs[i];
+        let u_spline = c[0] + eps * (c[1] + eps * (c[2] + eps * c[3]));
         u_spline + self.f_at_rmin * extrap_dist
     }
 
@@ -1640,10 +1632,17 @@ impl SplineTableSimdF32 {
             t_arr[3] - i3 as f32,
         ]);
 
-        let c0 = f32x4::from([self.u0[i0], self.u0[i1], self.u0[i2], self.u0[i3]]);
-        let c1 = f32x4::from([self.u1[i0], self.u1[i1], self.u1[i2], self.u1[i3]]);
-        let c2 = f32x4::from([self.u2[i0], self.u2[i1], self.u2[i2], self.u2[i3]]);
-        let c3 = f32x4::from([self.u3[i0], self.u3[i1], self.u3[i2], self.u3[i3]]);
+        // AoS layout: one memory access gets all 4 coefficients per interval
+        let (co0, co1, co2, co3) = (
+            &self.coeffs[i0],
+            &self.coeffs[i1],
+            &self.coeffs[i2],
+            &self.coeffs[i3],
+        );
+        let c0 = f32x4::from([co0[0], co1[0], co2[0], co3[0]]);
+        let c1 = f32x4::from([co0[1], co1[1], co2[1], co3[1]]);
+        let c2 = f32x4::from([co0[2], co1[2], co2[2], co3[2]]);
+        let c3 = f32x4::from([co0[3], co1[3], co2[3], co3[3]]);
 
         // Horner's method
         let u_spline = c3.mul_add(eps, c2);
@@ -1717,9 +1716,8 @@ impl SplineTableSimdF32 {
             }
         };
 
-        // Extract indices and compute
+        // Extract indices and gather coefficients (AoS layout)
         let t_arr = simd_f32_to_array(t);
-        let mut indices = [0usize; LANES_F32];
         let mut eps_arr: SimdArrayF32 = [0.0; LANES_F32];
         let mut c0_arr: SimdArrayF32 = [0.0; LANES_F32];
         let mut c1_arr: SimdArrayF32 = [0.0; LANES_F32];
@@ -1728,12 +1726,13 @@ impl SplineTableSimdF32 {
 
         for lane in 0..LANES_F32 {
             let i = (t_arr[lane] as usize).min(self.n - 2);
-            indices[lane] = i;
             eps_arr[lane] = t_arr[lane] - i as f32;
-            c0_arr[lane] = self.u0[i];
-            c1_arr[lane] = self.u1[i];
-            c2_arr[lane] = self.u2[i];
-            c3_arr[lane] = self.u3[i];
+            // AoS: one cache line fetch gets all 4 coefficients
+            let c = &self.coeffs[i];
+            c0_arr[lane] = c[0];
+            c1_arr[lane] = c[1];
+            c2_arr[lane] = c[2];
+            c3_arr[lane] = c[3];
         }
 
         let eps = simd_f32_from_array(eps_arr);
@@ -1782,14 +1781,14 @@ impl SplineTableSimdF32 {
 
     /// Get memory usage in bytes.
     pub fn memory_bytes(&self) -> usize {
-        4 * (self.u0.len() + self.u1.len() + self.u2.len() + self.u3.len())
+        self.coeffs.len() * 4 * std::mem::size_of::<f32>()
     }
 }
 
 impl Debug for SplineTableSimdF32 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SplineTableSimdF32")
-            .field("n_intervals", &self.u0.len())
+            .field("n_intervals", &self.coeffs.len())
             .field("r_range", &(self.r_min, self.r_max))
             .field("grid_type", &self.grid_type)
             .field("lanes", &LANES_F32)
