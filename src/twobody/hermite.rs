@@ -2095,6 +2095,55 @@ mod tests {
         assert!((stats.r_max - 2.5).abs() < 1e-10);
     }
 
+    /// Test UniformRsq grid type (legacy, lower accuracy expected).
+    #[test]
+    fn test_uniform_rsq_grid() {
+        let lj = LennardJones::new(1.0, 1.0);
+        let cutoff = 2.5;
+        let rsq_min = 1.0; // Start at r=1.0 (near LJ minimum) for better accuracy
+
+        let splined = SplinedPotential::with_cutoff(
+            &lj,
+            cutoff,
+            SplineConfig::high_accuracy() // Use more points for this legacy grid
+                .with_rsq_min(rsq_min)
+                .with_grid_type(GridType::UniformRsq),
+        );
+
+        // Test energy at a few points (UniformRsq is legacy with lower accuracy)
+        let test_rsq = [1.2, 2.0, 4.0, 6.0];
+        for &rsq in &test_rsq {
+            let u_spline = splined.isotropic_twobody_energy(rsq);
+            let u_exact = lj.isotropic_twobody_energy(rsq) - splined.energy_shift;
+
+            if rsq < cutoff * cutoff {
+                let rel_err = if u_exact.abs() > 0.01 {
+                    ((u_spline - u_exact) / u_exact).abs()
+                } else {
+                    (u_spline - u_exact).abs()
+                };
+                // UniformRsq has lower accuracy than PowerLaw grids
+                assert!(
+                    rel_err < 0.1,
+                    "UniformRsq error at rsq={}: spline={}, exact={}, err={}",
+                    rsq, u_spline, u_exact, rel_err
+                );
+            } else {
+                assert_eq!(u_spline, 0.0, "Beyond cutoff should be zero");
+            }
+        }
+
+        // Test force (also with relaxed tolerance)
+        let f_spline = splined.isotropic_twobody_force(2.0);
+        let f_exact = lj.isotropic_twobody_force(2.0);
+        let rel_err = ((f_spline - f_exact) / f_exact).abs();
+        assert!(rel_err < 0.1, "UniformRsq force error: {}", rel_err);
+
+        // Verify cutoff behavior works correctly
+        assert_eq!(splined.isotropic_twobody_energy(7.0), 0.0);
+        assert_eq!(splined.isotropic_twobody_force(7.0), 0.0);
+    }
+
     #[test]
     fn test_simd_matches_scalar() {
         let lj = LennardJones::new(1.0, 1.0);
