@@ -379,192 +379,25 @@ impl SplinedPotential {
     }
 
     /// Compute cubic Hermite spline coefficients.
-    ///
-    /// For each interval, we fit a cubic polynomial:
-    /// ```text
-    /// V(ε) = A₀ + A₁ε + A₂ε² + A₃ε³
-    /// ```
-    /// where ε ∈ [0, 1) is the fractional position within the interval.
-    ///
-    /// For UniformRsq: ε = (rsq - rsq_i) / Δrsq
-    /// For UniformR: ε = (r - r_i) / Δr
     fn compute_cubic_hermite_coeffs(
         rsq: &[f64],
         u: &[f64],
         f: &[f64],
         grid_type: GridType,
     ) -> Vec<SplineCoeffs> {
-        /// Compute cubic Hermite polynomial coefficients for an interval.
-        ///
-        /// Given values v0, v1 and derivatives dv0, dv1 at endpoints, returns
-        /// coefficients [c0, c1, c2, c3] for: V(ε) = c0 + c1·ε + c2·ε² + c3·ε³
-        #[inline]
-        fn hermite_coeffs(v0: f64, v1: f64, dv0: f64, dv1: f64, delta: f64) -> [f64; 4] {
-            [
-                v0,
-                delta * dv0,
-                3.0 * (v1 - v0) - delta * (2.0 * dv0 + dv1),
-                2.0 * (v0 - v1) + delta * (dv0 + dv1),
-            ]
-        }
-
-        /// Compute finite difference derivative at index i using central differences.
-        #[inline]
-        fn finite_diff_deriv(
-            values: &[f64],
-            coords: &[f64],
-            i: usize,
-            i_next: usize,
-            delta_default: f64,
-        ) -> f64 {
-            if i > 0 {
-                (values[i_next] - values[i - 1]) / (coords[i_next] - coords[i - 1])
-            } else {
-                (values[i_next] - values[i]) / delta_default
-            }
-        }
-
         let n = rsq.len();
         let mut coeffs = Vec::with_capacity(n);
 
         for i in 0..n.saturating_sub(1) {
-            let r_i = rsq[i].sqrt();
-            let r_i1 = rsq[i + 1].sqrt();
-
-            let u_i = u[i];
-            let u_i1 = u[i + 1];
-            let f_i = f[i];
-            let f_i1 = f[i + 1];
-
+            let interval = IntervalData::new(rsq, u, f, i, n);
             let (u_coeffs, f_coeffs) = match grid_type {
-                GridType::UniformRsq => {
-                    let delta_rsq = rsq[i + 1] - rsq[i];
-
-                    // dU/d(rsq) = dU/dr · dr/d(rsq) = -F(r) / (2r)
-                    let duds_i = if r_i > 1e-10 { -f_i / (2.0 * r_i) } else { 0.0 };
-                    let duds_i1 = if r_i1 > 1e-10 { -f_i1 / (2.0 * r_i1) } else { 0.0 };
-
-                    // df/d(rsq) using finite differences
-                    let dfds_i = finite_diff_deriv(f, rsq, i, i + 1, delta_rsq);
-                    let dfds_i1 = if i + 2 < n {
-                        (f[i + 2] - f[i]) / (rsq[i + 2] - rsq[i])
-                    } else {
-                        (f_i1 - f_i) / delta_rsq
-                    };
-
-                    (
-                        hermite_coeffs(u_i, u_i1, duds_i, duds_i1, delta_rsq),
-                        hermite_coeffs(f_i, f_i1, dfds_i, dfds_i1, delta_rsq),
-                    )
-                }
-                GridType::UniformR => {
-                    let delta_r = r_i1 - r_i;
-                    let dudr_i = -f_i;
-                    let dudr_i1 = -f_i1;
-
-                    // Build r array for finite differences
-                    let dfdr_i = if i > 0 {
-                        let r_prev = rsq[i - 1].sqrt();
-                        (f_i1 - f[i - 1]) / (r_i1 - r_prev)
-                    } else {
-                        (f_i1 - f_i) / delta_r
-                    };
-                    let dfdr_i1 = if i + 2 < n {
-                        let r_next = rsq[i + 2].sqrt();
-                        (f[i + 2] - f_i) / (r_next - r_i)
-                    } else {
-                        (f_i1 - f_i) / delta_r
-                    };
-
-                    (
-                        hermite_coeffs(u_i, u_i1, dudr_i, dudr_i1, delta_r),
-                        hermite_coeffs(f_i, f_i1, dfdr_i, dfdr_i1, delta_r),
-                    )
-                }
-                GridType::PowerLaw(_) | GridType::PowerLaw2 => {
-                    // Polynomial in x-space where x = ((r - r_min)/(r_max - r_min))^(1/p)
-                    // PowerLaw2 is optimized p=2 case
-                    let p = match grid_type {
-                        GridType::PowerLaw2 => 2.0,
-                        GridType::PowerLaw(p) => p,
-                        _ => unreachable!(),
-                    };
-
-                    let delta_x = 1.0 / (n - 1) as f64;
-                    let x_i = i as f64 * delta_x;
-                    let x_i1 = (i + 1) as f64 * delta_x;
-                    let r_range = rsq.last().unwrap().sqrt() - rsq.first().unwrap().sqrt();
-
-                    // dr/dx = p * r_range * x^(p-1)
-                    // For p=2: dr/dx = 2 * r_range * x (optimized, no powf)
-                    let (drdx_i, drdx_i1) = if (p - 2.0).abs() < 1e-10 {
-                        let drdx_i = if x_i > 1e-10 { 2.0 * r_range * x_i } else { 2.0 * r_range * 1e-10 };
-                        let drdx_i1 = 2.0 * r_range * x_i1;
-                        (drdx_i, drdx_i1)
-                    } else {
-                        let drdx_i = if x_i > 1e-10 {
-                            p * r_range * x_i.powf(p - 1.0)
-                        } else {
-                            p * r_range * (1e-10_f64).powf(p - 1.0)
-                        };
-                        let drdx_i1 = p * r_range * x_i1.powf(p - 1.0);
-                        (drdx_i, drdx_i1)
-                    };
-
-                    let dudx_i = -f_i * drdx_i;
-                    let dudx_i1 = -f_i1 * drdx_i1;
-
-                    let dfdx_i = if i > 0 {
-                        let x_prev = (i - 1) as f64 * delta_x;
-                        (f_i1 - f[i - 1]) / (x_i1 - x_prev)
-                    } else {
-                        (f_i1 - f_i) / delta_x
-                    };
-                    let dfdx_i1 = if i + 2 < n {
-                        let x_next = (i + 2) as f64 * delta_x;
-                        (f[i + 2] - f_i) / (x_next - x_i)
-                    } else {
-                        (f_i1 - f_i) / delta_x
-                    };
-
-                    (
-                        hermite_coeffs(u_i, u_i1, dudx_i, dudx_i1, delta_x),
-                        hermite_coeffs(f_i, f_i1, dfdx_i, dfdx_i1, delta_x),
-                    )
-                }
-                GridType::InverseRsq => {
-                    let w_i = 1.0 / rsq[i];
-                    let w_i1 = 1.0 / rsq[i + 1];
-                    let delta_w = w_i1 - w_i;
-
-                    // dU/dw = F * r³ / 2 (derived from chain rule)
-                    let dudw_i = f_i * r_i * r_i * r_i / 2.0;
-                    let dudw_i1 = f_i1 * r_i1 * r_i1 * r_i1 / 2.0;
-
-                    let dfdw_i = if i > 0 {
-                        let w_prev = 1.0 / rsq[i - 1];
-                        (f_i1 - f[i - 1]) / (w_i1 - w_prev)
-                    } else {
-                        (f_i1 - f_i) / delta_w
-                    };
-                    let dfdw_i1 = if i + 2 < n {
-                        let w_next = 1.0 / rsq[i + 2];
-                        (f[i + 2] - f_i) / (w_next - w_i)
-                    } else {
-                        (f_i1 - f_i) / delta_w
-                    };
-
-                    (
-                        hermite_coeffs(u_i, u_i1, dudw_i, dudw_i1, delta_w),
-                        hermite_coeffs(f_i, f_i1, dfdw_i, dfdw_i1, delta_w),
-                    )
-                }
+                GridType::UniformRsq => interval.coeffs_uniform_rsq(),
+                GridType::UniformR => interval.coeffs_uniform_r(),
+                GridType::PowerLaw(p) => interval.coeffs_power_law(p),
+                GridType::PowerLaw2 => interval.coeffs_power_law(2.0),
+                GridType::InverseRsq => interval.coeffs_inverse_rsq(),
             };
-
-            coeffs.push(SplineCoeffs {
-                u: u_coeffs,
-                f: f_coeffs,
-            });
+            coeffs.push(SplineCoeffs { u: u_coeffs, f: f_coeffs });
         }
 
         // Duplicate last interval for safety at boundary
@@ -574,6 +407,157 @@ impl SplinedPotential {
 
         coeffs
     }
+}
+
+/// Helper for computing Hermite spline coefficients for a single interval.
+///
+/// Encapsulates the data and methods needed to compute coefficients for
+/// different grid types, making `compute_cubic_hermite_coeffs` more readable.
+struct IntervalData<'a> {
+    rsq: &'a [f64],
+    f: &'a [f64],
+    i: usize,
+    n: usize,
+    // Precomputed values for this interval
+    r_i: f64,
+    r_i1: f64,
+    u_i: f64,
+    u_i1: f64,
+    f_i: f64,
+    f_i1: f64,
+}
+
+impl<'a> IntervalData<'a> {
+    fn new(rsq: &'a [f64], u: &'a [f64], f: &'a [f64], i: usize, n: usize) -> Self {
+        Self {
+            rsq,
+            f,
+            i,
+            n,
+            r_i: rsq[i].sqrt(),
+            r_i1: rsq[i + 1].sqrt(),
+            u_i: u[i],
+            u_i1: u[i + 1],
+            f_i: f[i],
+            f_i1: f[i + 1],
+        }
+    }
+
+    /// Cubic Hermite polynomial coefficients: V(ε) = c0 + c1·ε + c2·ε² + c3·ε³
+    #[inline]
+    fn hermite(v0: f64, v1: f64, dv0: f64, dv1: f64, delta: f64) -> [f64; 4] {
+        [
+            v0,
+            delta * dv0,
+            3.0 * (v1 - v0) - delta * (2.0 * dv0 + dv1),
+            2.0 * (v0 - v1) + delta * (dv0 + dv1),
+        ]
+    }
+
+    /// Finite difference for df/d(coord) at i+1 position
+    fn df_next(&self, coord_i: f64, coord_i1: f64, coord_fn: impl Fn(usize) -> f64) -> f64 {
+        let delta = coord_i1 - coord_i;
+        if self.i + 2 < self.n {
+            (self.f[self.i + 2] - self.f[self.i]) / (coord_fn(self.i + 2) - coord_i)
+        } else {
+            (self.f_i1 - self.f_i) / delta
+        }
+    }
+
+    /// Finite difference for df/d(coord) at i position
+    fn df_prev(&self, coord_i1: f64, delta: f64, coord_fn: impl Fn(usize) -> f64) -> f64 {
+        if self.i > 0 {
+            (self.f_i1 - self.f[self.i - 1]) / (coord_i1 - coord_fn(self.i - 1))
+        } else {
+            (self.f_i1 - self.f_i) / delta
+        }
+    }
+
+    /// UniformRsq: polynomial in r² space (legacy)
+    fn coeffs_uniform_rsq(&self) -> ([f64; 4], [f64; 4]) {
+        let delta = self.rsq[self.i + 1] - self.rsq[self.i];
+
+        // dU/d(rsq) = -F(r) / (2r)  via chain rule
+        let du_i = if self.r_i > 1e-10 { -self.f_i / (2.0 * self.r_i) } else { 0.0 };
+        let du_i1 = if self.r_i1 > 1e-10 { -self.f_i1 / (2.0 * self.r_i1) } else { 0.0 };
+
+        let df_i = self.df_prev(self.rsq[self.i + 1], delta, |j| self.rsq[j]);
+        let df_i1 = self.df_next(self.rsq[self.i], self.rsq[self.i + 1], |j| self.rsq[j]);
+
+        (
+            Self::hermite(self.u_i, self.u_i1, du_i, du_i1, delta),
+            Self::hermite(self.f_i, self.f_i1, df_i, df_i1, delta),
+        )
+    }
+
+    /// UniformR: polynomial in r space
+    fn coeffs_uniform_r(&self) -> ([f64; 4], [f64; 4]) {
+        let delta = self.r_i1 - self.r_i;
+
+        // dU/dr = -F
+        let du_i = -self.f_i;
+        let du_i1 = -self.f_i1;
+
+        let df_i = self.df_prev(self.r_i1, delta, |j| self.rsq[j].sqrt());
+        let df_i1 = self.df_next(self.r_i, self.r_i1, |j| self.rsq[j].sqrt());
+
+        (
+            Self::hermite(self.u_i, self.u_i1, du_i, du_i1, delta),
+            Self::hermite(self.f_i, self.f_i1, df_i, df_i1, delta),
+        )
+    }
+
+    /// PowerLaw: polynomial in x-space where x = ((r-r_min)/(r_max-r_min))^(1/p)
+    fn coeffs_power_law(&self, p: f64) -> ([f64; 4], [f64; 4]) {
+        let delta = 1.0 / (self.n - 1) as f64;
+        let x_i = self.i as f64 * delta;
+        let x_i1 = (self.i + 1) as f64 * delta;
+        let r_range = self.rsq.last().unwrap().sqrt() - self.rsq.first().unwrap().sqrt();
+
+        // dr/dx = p * r_range * x^(p-1), optimized for p=2
+        let drdx = |x: f64| -> f64 {
+            let x_safe = if x > 1e-10 { x } else { 1e-10 };
+            if (p - 2.0).abs() < 1e-10 {
+                2.0 * r_range * x_safe
+            } else {
+                p * r_range * x_safe.powf(p - 1.0)
+            }
+        };
+
+        // dU/dx = -F * dr/dx
+        let du_i = -self.f_i * drdx(x_i);
+        let du_i1 = -self.f_i1 * drdx(x_i1);
+
+        let df_i = self.df_prev(x_i1, delta, |j| j as f64 * delta);
+        let df_i1 = self.df_next(x_i, x_i1, |j| j as f64 * delta);
+
+        (
+            Self::hermite(self.u_i, self.u_i1, du_i, du_i1, delta),
+            Self::hermite(self.f_i, self.f_i1, df_i, df_i1, delta),
+        )
+    }
+
+    /// InverseRsq: polynomial in w-space where w = 1/rsq
+    fn coeffs_inverse_rsq(&self) -> ([f64; 4], [f64; 4]) {
+        let w_i = 1.0 / self.rsq[self.i];
+        let w_i1 = 1.0 / self.rsq[self.i + 1];
+        let delta = w_i1 - w_i;
+
+        // dU/dw = F * r³ / 2  via chain rule
+        let du_i = self.f_i * self.r_i.powi(3) / 2.0;
+        let du_i1 = self.f_i1 * self.r_i1.powi(3) / 2.0;
+
+        let df_i = self.df_prev(w_i1, delta, |j| 1.0 / self.rsq[j]);
+        let df_i1 = self.df_next(w_i, w_i1, |j| 1.0 / self.rsq[j]);
+
+        (
+            Self::hermite(self.u_i, self.u_i1, du_i, du_i1, delta),
+            Self::hermite(self.f_i, self.f_i1, df_i, df_i1, delta),
+        )
+    }
+}
+
+impl SplinedPotential {
 
     /// Get the squared cutoff distance.
     #[inline]
