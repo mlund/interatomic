@@ -1024,9 +1024,17 @@ impl SplinedPotential {
         }
     }
 
-    /// Convert to SIMD-friendly SoA layout for batch evaluation.
+    /// Convert to SIMD-friendly SoA layout for batch evaluation (f64).
     pub fn to_simd(&self) -> SplineTableSimd {
         SplineTableSimd::from_aos(self)
+    }
+
+    /// Convert to single-precision (f32) SIMD layout for faster evaluation.
+    ///
+    /// Uses architecture-optimal SIMD width: f32x8 on x86_64, f32x4 on aarch64.
+    /// Provides ~2x memory efficiency at the cost of reduced precision.
+    pub fn to_simd_f32(&self) -> SplineTableSimdF32 {
+        SplineTableSimdF32::from_spline(self)
     }
 }
 
@@ -1034,7 +1042,53 @@ impl SplinedPotential {
 // SIMD batch evaluation with Structure-of-Arrays layout
 // ============================================================================
 
-use wide::{f64x4, CmpLt};
+use wide::{f32x4, f64x4, CmpLt};
+
+#[cfg(not(target_arch = "aarch64"))]
+use wide::f32x8;
+
+// ============================================================================
+// Architecture-specific SIMD configuration
+// ============================================================================
+
+/// Compile-time SIMD configuration for f32 based on target architecture.
+/// - x86_64: f32x8 (AVX2, 256-bit, 8 lanes)
+/// - aarch64: f32x4 (NEON, 128-bit, 4 lanes)
+#[cfg(target_arch = "aarch64")]
+mod simd_config_f32 {
+    pub use wide::f32x4 as SimdF32;
+    pub const LANES_F32: usize = 4;
+    pub type SimdArrayF32 = [f32; 4];
+
+    #[inline]
+    pub fn simd_f32_from_array(arr: SimdArrayF32) -> SimdF32 {
+        SimdF32::from(arr)
+    }
+
+    #[inline]
+    pub fn simd_f32_to_array(v: SimdF32) -> SimdArrayF32 {
+        v.into()
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+mod simd_config_f32 {
+    pub use wide::f32x8 as SimdF32;
+    pub const LANES_F32: usize = 8;
+    pub type SimdArrayF32 = [f32; 8];
+
+    #[inline]
+    pub fn simd_f32_from_array(arr: SimdArrayF32) -> SimdF32 {
+        SimdF32::from(arr)
+    }
+
+    #[inline]
+    pub fn simd_f32_to_array(v: SimdF32) -> SimdArrayF32 {
+        v.into()
+    }
+}
+
+pub use simd_config_f32::{simd_f32_from_array, simd_f32_to_array, SimdArrayF32, SimdF32, LANES_F32};
 
 /// SIMD-friendly spline table with Structure-of-Arrays layout.
 ///
@@ -1175,21 +1229,16 @@ impl SplineTableSimd {
     ///
     /// This is the core SIMD kernel - evaluates 4 spline lookups in parallel.
     /// Linearly extrapolates below r_min to maintain repulsive behavior.
-    /// Note: For UniformR and PowerLaw grids, this requires sqrt/powf which may reduce SIMD benefits.
+    /// Uses vectorized sqrt for PowerLaw2 and UniformR grids.
     #[inline]
     pub fn energy_x4(&self, rsq: f64x4) -> f64x4 {
         let rsq_max = f64x4::splat(self.r_max * self.r_max);
         let r_min_v = f64x4::splat(self.r_min);
+        let r_max_v = f64x4::splat(self.r_max);
         let zero = f64x4::ZERO;
 
-        // Compute r for extrapolation (need sqrt for all grid types here)
-        let rsq_arr: [f64; 4] = rsq.into();
-        let r = f64x4::from([
-            rsq_arr[0].sqrt(),
-            rsq_arr[1].sqrt(),
-            rsq_arr[2].sqrt(),
-            rsq_arr[3].sqrt(),
-        ]);
+        // Compute r using SIMD sqrt (needed for extrapolation and most grid types)
+        let r = rsq.sqrt();
 
         // Linear extrapolation distance (0 if r >= r_min)
         let extrap_dist = (r_min_v - r).max(zero);
@@ -1203,74 +1252,48 @@ impl SplineTableSimd {
                 (rsq_clamped - rsq_min) * inv_delta
             }
             GridType::UniformR => {
-                // Need sqrt for UniformR grid
-                let r_min = f64x4::splat(self.r_min);
-                let r_max = f64x4::splat(self.r_max);
+                // Fully vectorized with SIMD sqrt (already computed above)
                 let inv_delta = f64x4::splat(self.inv_delta);
-                let rsq_arr: [f64; 4] = rsq.into();
-                let r = f64x4::from([
-                    rsq_arr[0].sqrt(),
-                    rsq_arr[1].sqrt(),
-                    rsq_arr[2].sqrt(),
-                    rsq_arr[3].sqrt(),
-                ]);
-                let r_clamped = r.max(r_min).min(r_max);
-                (r_clamped - r_min) * inv_delta
+                let r_clamped = r.max(r_min_v).min(r_max_v);
+                (r_clamped - r_min_v) * inv_delta
             }
             GridType::PowerLaw(p) => {
                 // PowerLaw: x = ((r - r_min) / r_range)^(1/p), t = x * (n-1)
-                // Requires scalar fallback for powf
+                // Requires scalar fallback for powf (no SIMD powf available)
                 let r_range = self.r_max - self.r_min;
                 let inv_p = 1.0 / p;
                 let n_minus_1 = (self.n - 1) as f64;
-                let rsq_arr: [f64; 4] = rsq.into();
+                let r_arr: [f64; 4] = r.into();
                 f64x4::from([
                     {
-                        let r = rsq_arr[0].sqrt().max(self.r_min).min(self.r_max);
+                        let r = r_arr[0].max(self.r_min).min(self.r_max);
                         ((r - self.r_min) / r_range).powf(inv_p) * n_minus_1
                     },
                     {
-                        let r = rsq_arr[1].sqrt().max(self.r_min).min(self.r_max);
+                        let r = r_arr[1].max(self.r_min).min(self.r_max);
                         ((r - self.r_min) / r_range).powf(inv_p) * n_minus_1
                     },
                     {
-                        let r = rsq_arr[2].sqrt().max(self.r_min).min(self.r_max);
+                        let r = r_arr[2].max(self.r_min).min(self.r_max);
                         ((r - self.r_min) / r_range).powf(inv_p) * n_minus_1
                     },
                     {
-                        let r = rsq_arr[3].sqrt().max(self.r_min).min(self.r_max);
+                        let r = r_arr[3].max(self.r_min).min(self.r_max);
                         ((r - self.r_min) / r_range).powf(inv_p) * n_minus_1
                     },
                 ])
             }
             GridType::PowerLaw2 => {
-                // Optimized p=2: x = sqrt((r - r_min) / r_range), t = x * (n-1)
-                // Uses sqrt instead of powf(0.5)
-                let r_range = self.r_max - self.r_min;
-                let n_minus_1 = (self.n - 1) as f64;
-                let rsq_arr: [f64; 4] = rsq.into();
-                f64x4::from([
-                    {
-                        let r = rsq_arr[0].sqrt().max(self.r_min).min(self.r_max);
-                        ((r - self.r_min) / r_range).sqrt() * n_minus_1
-                    },
-                    {
-                        let r = rsq_arr[1].sqrt().max(self.r_min).min(self.r_max);
-                        ((r - self.r_min) / r_range).sqrt() * n_minus_1
-                    },
-                    {
-                        let r = rsq_arr[2].sqrt().max(self.r_min).min(self.r_max);
-                        ((r - self.r_min) / r_range).sqrt() * n_minus_1
-                    },
-                    {
-                        let r = rsq_arr[3].sqrt().max(self.r_min).min(self.r_max);
-                        ((r - self.r_min) / r_range).sqrt() * n_minus_1
-                    },
-                ])
+                // Fully vectorized with two SIMD sqrts:
+                // x = sqrt((r - r_min) / r_range), t = x * (n-1)
+                let r_range_v = f64x4::splat(self.r_max - self.r_min);
+                let n_minus_1 = f64x4::splat((self.n - 1) as f64);
+                let r_clamped = r.max(r_min_v).min(r_max_v);
+                let x = ((r_clamped - r_min_v) / r_range_v).sqrt();
+                x * n_minus_1
             }
             GridType::InverseRsq => {
-                // w = 1/rsq, t = (w - w_min) * inv_delta
-                // This only requires division, no sqrt!
+                // Fully vectorized - only requires division, no sqrt for index!
                 let rsq_min = self.r_min * self.r_min;
                 let rsq_max = self.r_max * self.r_max;
                 let w_min = 1.0 / rsq_max;
@@ -1402,6 +1425,374 @@ impl Debug for SplineTableSimd {
             .field("n_intervals", &self.u0.len())
             .field("r_range", &(self.r_min, self.r_max))
             .field("grid_type", &self.grid_type)
+            .field("memory_bytes", &self.memory_bytes())
+            .finish()
+    }
+}
+
+// ============================================================================
+// Single-precision (f32) SIMD evaluation
+// ============================================================================
+
+/// Single-precision SIMD spline table with architecture-specific width.
+///
+/// Uses f32x8 (8 lanes) on x86_64 with AVX2, f32x4 (4 lanes) on aarch64 with NEON.
+/// Provides ~2x memory efficiency and potentially better SIMD throughput compared
+/// to the f64 version, at the cost of reduced precision.
+#[derive(Clone)]
+pub struct SplineTableSimdF32 {
+    /// Energy coefficients (f32)
+    u0: Vec<f32>,
+    u1: Vec<f32>,
+    u2: Vec<f32>,
+    u3: Vec<f32>,
+    /// Grid parameters
+    r_min: f32,
+    r_max: f32,
+    inv_delta: f32,
+    n: usize,
+    grid_type: GridType,
+    /// Force at r_min for linear extrapolation
+    f_at_rmin: f32,
+}
+
+impl SplineTableSimdF32 {
+    /// Create f32 SoA layout from f64 SplinedPotential.
+    ///
+    /// Converts coefficients to single precision for faster evaluation.
+    pub fn from_spline(spline: &SplinedPotential) -> Self {
+        let n = spline.coeffs.len();
+        let mut u0 = Vec::with_capacity(n);
+        let mut u1 = Vec::with_capacity(n);
+        let mut u2 = Vec::with_capacity(n);
+        let mut u3 = Vec::with_capacity(n);
+
+        for c in &spline.coeffs {
+            u0.push(c.u[0] as f32);
+            u1.push(c.u[1] as f32);
+            u2.push(c.u[2] as f32);
+            u3.push(c.u[3] as f32);
+        }
+
+        Self {
+            u0,
+            u1,
+            u2,
+            u3,
+            r_min: spline.r_min as f32,
+            r_max: spline.r_max as f32,
+            inv_delta: spline.inv_delta as f32,
+            n: spline.n,
+            grid_type: spline.grid_type,
+            f_at_rmin: spline.f_at_rmin as f32,
+        }
+    }
+
+    /// Returns the number of SIMD lanes for this architecture.
+    #[inline]
+    pub const fn lanes() -> usize {
+        LANES_F32
+    }
+
+    /// Evaluate energy for a single distance (scalar).
+    #[inline]
+    pub fn energy(&self, rsq: f32) -> f32 {
+        let rsq_max = self.r_max * self.r_max;
+        if rsq >= rsq_max {
+            return 0.0;
+        }
+
+        let r = rsq.sqrt();
+        let extrap_dist = (self.r_min - r).max(0.0);
+
+        let (i, eps) = match self.grid_type {
+            GridType::UniformRsq => {
+                let rsq_min = self.r_min * self.r_min;
+                let rsq_clamped = rsq.max(rsq_min);
+                let t = (rsq_clamped - rsq_min) * self.inv_delta;
+                let i = (t as usize).min(self.n - 2);
+                (i, t - i as f32)
+            }
+            GridType::UniformR => {
+                let r_clamped = r.max(self.r_min);
+                let t = (r_clamped - self.r_min) * self.inv_delta;
+                let i = (t as usize).min(self.n - 2);
+                (i, t - i as f32)
+            }
+            GridType::PowerLaw(p) => {
+                let r_clamped = r.max(self.r_min).min(self.r_max);
+                let r_range = self.r_max - self.r_min;
+                let x = ((r_clamped - self.r_min) / r_range).powf(1.0 / p as f32);
+                let t = x * (self.n - 1) as f32;
+                let i = (t as usize).min(self.n - 2);
+                (i, t - i as f32)
+            }
+            GridType::PowerLaw2 => {
+                let r_clamped = r.max(self.r_min).min(self.r_max);
+                let r_range = self.r_max - self.r_min;
+                let x = ((r_clamped - self.r_min) / r_range).sqrt();
+                let t = x * (self.n - 1) as f32;
+                let i = (t as usize).min(self.n - 2);
+                (i, t - i as f32)
+            }
+            GridType::InverseRsq => {
+                let rsq_min = self.r_min * self.r_min;
+                let rsq_max = self.r_max * self.r_max;
+                let rsq_clamped = rsq.max(rsq_min).min(rsq_max);
+                let w = 1.0 / rsq_clamped;
+                let w_min = 1.0 / rsq_max;
+                let t = (w - w_min) * self.inv_delta;
+                let i = (t as usize).min(self.n - 2);
+                (i, t - i as f32)
+            }
+        };
+
+        let u_spline = self.u0[i] + eps * (self.u1[i] + eps * (self.u2[i] + eps * self.u3[i]));
+        u_spline + self.f_at_rmin * extrap_dist
+    }
+
+    /// Evaluate energies for 4 distances using f32x4 SIMD.
+    ///
+    /// Available on all architectures. For x86_64, prefer `energy_simd` which
+    /// uses wider vectors when available.
+    #[inline]
+    pub fn energy_x4(&self, rsq: f32x4) -> f32x4 {
+        let rsq_max = f32x4::splat(self.r_max * self.r_max);
+        let r_min_v = f32x4::splat(self.r_min);
+        let r_max_v = f32x4::splat(self.r_max);
+        let zero = f32x4::ZERO;
+
+        // SIMD sqrt for r
+        let r = rsq.sqrt();
+        let extrap_dist = (r_min_v - r).max(zero);
+
+        let t = match self.grid_type {
+            GridType::UniformRsq => {
+                let rsq_min = f32x4::splat(self.r_min * self.r_min);
+                let inv_delta = f32x4::splat(self.inv_delta);
+                let rsq_clamped = rsq.max(rsq_min).min(rsq_max);
+                (rsq_clamped - rsq_min) * inv_delta
+            }
+            GridType::UniformR => {
+                let inv_delta = f32x4::splat(self.inv_delta);
+                let r_clamped = r.max(r_min_v).min(r_max_v);
+                (r_clamped - r_min_v) * inv_delta
+            }
+            GridType::PowerLaw(p) => {
+                // Scalar fallback for powf
+                let r_range = self.r_max - self.r_min;
+                let inv_p = 1.0 / p as f32;
+                let n_minus_1 = (self.n - 1) as f32;
+                let r_arr: [f32; 4] = r.into();
+                f32x4::from([
+                    {
+                        let r = r_arr[0].max(self.r_min).min(self.r_max);
+                        ((r - self.r_min) / r_range).powf(inv_p) * n_minus_1
+                    },
+                    {
+                        let r = r_arr[1].max(self.r_min).min(self.r_max);
+                        ((r - self.r_min) / r_range).powf(inv_p) * n_minus_1
+                    },
+                    {
+                        let r = r_arr[2].max(self.r_min).min(self.r_max);
+                        ((r - self.r_min) / r_range).powf(inv_p) * n_minus_1
+                    },
+                    {
+                        let r = r_arr[3].max(self.r_min).min(self.r_max);
+                        ((r - self.r_min) / r_range).powf(inv_p) * n_minus_1
+                    },
+                ])
+            }
+            GridType::PowerLaw2 => {
+                // Fully vectorized with two SIMD sqrts
+                let r_range_v = f32x4::splat(self.r_max - self.r_min);
+                let n_minus_1 = f32x4::splat((self.n - 1) as f32);
+                let r_clamped = r.max(r_min_v).min(r_max_v);
+                let x = ((r_clamped - r_min_v) / r_range_v).sqrt();
+                x * n_minus_1
+            }
+            GridType::InverseRsq => {
+                let rsq_min = self.r_min * self.r_min;
+                let rsq_max_scalar = self.r_max * self.r_max;
+                let w_min = 1.0 / rsq_max_scalar;
+                let inv_delta = f32x4::splat(self.inv_delta);
+                let w_min_v = f32x4::splat(w_min);
+                let rsq_min_v = f32x4::splat(rsq_min);
+                let rsq_max_v = f32x4::splat(rsq_max_scalar);
+                let rsq_clamped = rsq.max(rsq_min_v).min(rsq_max_v);
+                let one = f32x4::splat(1.0);
+                let w = one / rsq_clamped;
+                (w - w_min_v) * inv_delta
+            }
+        };
+
+        // Extract indices
+        let t_arr: [f32; 4] = t.into();
+        let i0 = (t_arr[0] as usize).min(self.n - 2);
+        let i1 = (t_arr[1] as usize).min(self.n - 2);
+        let i2 = (t_arr[2] as usize).min(self.n - 2);
+        let i3 = (t_arr[3] as usize).min(self.n - 2);
+
+        let eps = f32x4::from([
+            t_arr[0] - i0 as f32,
+            t_arr[1] - i1 as f32,
+            t_arr[2] - i2 as f32,
+            t_arr[3] - i3 as f32,
+        ]);
+
+        let c0 = f32x4::from([self.u0[i0], self.u0[i1], self.u0[i2], self.u0[i3]]);
+        let c1 = f32x4::from([self.u1[i0], self.u1[i1], self.u1[i2], self.u1[i3]]);
+        let c2 = f32x4::from([self.u2[i0], self.u2[i1], self.u2[i2], self.u2[i3]]);
+        let c3 = f32x4::from([self.u3[i0], self.u3[i1], self.u3[i2], self.u3[i3]]);
+
+        // Horner's method
+        let u_spline = c3.mul_add(eps, c2);
+        let u_spline = u_spline.mul_add(eps, c1);
+        let u_spline = u_spline.mul_add(eps, c0);
+
+        let f_at_rmin_v = f32x4::splat(self.f_at_rmin);
+        let result = f_at_rmin_v.mul_add(extrap_dist, u_spline);
+
+        let mask = rsq.cmp_lt(rsq_max);
+        result & mask.blend(f32x4::splat(f32::from_bits(!0u32)), f32x4::ZERO)
+    }
+
+    /// Evaluate energies using architecture-optimal SIMD width.
+    ///
+    /// Uses f32x8 on x86_64 (AVX2), f32x4 on aarch64 (NEON).
+    #[inline]
+    pub fn energy_simd(&self, rsq: SimdF32) -> SimdF32 {
+        let rsq_max = SimdF32::splat(self.r_max * self.r_max);
+        let r_min_v = SimdF32::splat(self.r_min);
+        let r_max_v = SimdF32::splat(self.r_max);
+        let zero = SimdF32::ZERO;
+
+        let r = rsq.sqrt();
+        let extrap_dist = (r_min_v - r).max(zero);
+
+        let t = match self.grid_type {
+            GridType::UniformRsq => {
+                let rsq_min = SimdF32::splat(self.r_min * self.r_min);
+                let inv_delta = SimdF32::splat(self.inv_delta);
+                let rsq_clamped = rsq.max(rsq_min).min(rsq_max);
+                (rsq_clamped - rsq_min) * inv_delta
+            }
+            GridType::UniformR => {
+                let inv_delta = SimdF32::splat(self.inv_delta);
+                let r_clamped = r.max(r_min_v).min(r_max_v);
+                (r_clamped - r_min_v) * inv_delta
+            }
+            GridType::PowerLaw(p) => {
+                // Scalar fallback
+                let r_range = self.r_max - self.r_min;
+                let inv_p = 1.0 / p as f32;
+                let n_minus_1 = (self.n - 1) as f32;
+                let r_arr = simd_f32_to_array(r);
+                let mut t_arr: SimdArrayF32 = [0.0; LANES_F32];
+                for lane in 0..LANES_F32 {
+                    let r_val = r_arr[lane].max(self.r_min).min(self.r_max);
+                    t_arr[lane] = ((r_val - self.r_min) / r_range).powf(inv_p) * n_minus_1;
+                }
+                simd_f32_from_array(t_arr)
+            }
+            GridType::PowerLaw2 => {
+                let r_range_v = SimdF32::splat(self.r_max - self.r_min);
+                let n_minus_1 = SimdF32::splat((self.n - 1) as f32);
+                let r_clamped = r.max(r_min_v).min(r_max_v);
+                let x = ((r_clamped - r_min_v) / r_range_v).sqrt();
+                x * n_minus_1
+            }
+            GridType::InverseRsq => {
+                let rsq_min = self.r_min * self.r_min;
+                let rsq_max_scalar = self.r_max * self.r_max;
+                let w_min = 1.0 / rsq_max_scalar;
+                let inv_delta = SimdF32::splat(self.inv_delta);
+                let w_min_v = SimdF32::splat(w_min);
+                let rsq_min_v = SimdF32::splat(rsq_min);
+                let rsq_max_v = SimdF32::splat(rsq_max_scalar);
+                let rsq_clamped = rsq.max(rsq_min_v).min(rsq_max_v);
+                let one = SimdF32::splat(1.0);
+                let w = one / rsq_clamped;
+                (w - w_min_v) * inv_delta
+            }
+        };
+
+        // Extract indices and compute
+        let t_arr = simd_f32_to_array(t);
+        let mut indices = [0usize; LANES_F32];
+        let mut eps_arr: SimdArrayF32 = [0.0; LANES_F32];
+        let mut c0_arr: SimdArrayF32 = [0.0; LANES_F32];
+        let mut c1_arr: SimdArrayF32 = [0.0; LANES_F32];
+        let mut c2_arr: SimdArrayF32 = [0.0; LANES_F32];
+        let mut c3_arr: SimdArrayF32 = [0.0; LANES_F32];
+
+        for lane in 0..LANES_F32 {
+            let i = (t_arr[lane] as usize).min(self.n - 2);
+            indices[lane] = i;
+            eps_arr[lane] = t_arr[lane] - i as f32;
+            c0_arr[lane] = self.u0[i];
+            c1_arr[lane] = self.u1[i];
+            c2_arr[lane] = self.u2[i];
+            c3_arr[lane] = self.u3[i];
+        }
+
+        let eps = simd_f32_from_array(eps_arr);
+        let c0 = simd_f32_from_array(c0_arr);
+        let c1 = simd_f32_from_array(c1_arr);
+        let c2 = simd_f32_from_array(c2_arr);
+        let c3 = simd_f32_from_array(c3_arr);
+
+        let u_spline = c3.mul_add(eps, c2);
+        let u_spline = u_spline.mul_add(eps, c1);
+        let u_spline = u_spline.mul_add(eps, c0);
+
+        let f_at_rmin_v = SimdF32::splat(self.f_at_rmin);
+        let result = f_at_rmin_v.mul_add(extrap_dist, u_spline);
+
+        let mask = rsq.cmp_lt(rsq_max);
+        result & mask.blend(SimdF32::splat(f32::from_bits(!0u32)), SimdF32::ZERO)
+    }
+
+    /// Sum energies for a batch using architecture-optimal SIMD.
+    #[inline]
+    pub fn sum_energies_simd(&self, rsq_values: &[f32]) -> f32 {
+        let n = rsq_values.len();
+        let chunks = n / LANES_F32;
+        let mut sum = SimdF32::ZERO;
+
+        for i in 0..chunks {
+            let base = i * LANES_F32;
+            let mut rsq_arr: SimdArrayF32 = [0.0; LANES_F32];
+            for lane in 0..LANES_F32 {
+                rsq_arr[lane] = rsq_values[base + lane];
+            }
+            sum += self.energy_simd(simd_f32_from_array(rsq_arr));
+        }
+
+        let arr = simd_f32_to_array(sum);
+        let mut total: f32 = arr.iter().sum();
+
+        // Handle remainder
+        for rsq in rsq_values.iter().skip(chunks * LANES_F32) {
+            total += self.energy(*rsq);
+        }
+
+        total
+    }
+
+    /// Get memory usage in bytes.
+    pub fn memory_bytes(&self) -> usize {
+        4 * (self.u0.len() + self.u1.len() + self.u2.len() + self.u3.len())
+    }
+}
+
+impl Debug for SplineTableSimdF32 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SplineTableSimdF32")
+            .field("n_intervals", &self.u0.len())
+            .field("r_range", &(self.r_min, self.r_max))
+            .field("grid_type", &self.grid_type)
+            .field("lanes", &LANES_F32)
             .field("memory_bytes", &self.memory_bytes())
             .finish()
     }
@@ -2609,6 +3000,70 @@ mod tests {
                 simd_out[i]
             );
         }
+    }
+
+    /// Test f32 SIMD matches f64 scalar within single-precision tolerance.
+    #[test]
+    fn test_f32_simd_matches_scalar() {
+        let lj = LennardJones::new(1.0, 1.0);
+        let cutoff = 2.5;
+        let splined = SplinedPotential::with_cutoff(&lj, cutoff, SplineConfig::default());
+        let simd_f32 = SplineTableSimdF32::from_spline(&splined);
+
+        // Test batch of distances
+        let distances_f32: Vec<f32> = (0..100)
+            .map(|i| 1.0f32 + 0.05 * i as f32)
+            .collect();
+
+        // Scalar f64 results (ground truth)
+        let scalar_sum: f64 = distances_f32
+            .iter()
+            .map(|&r2| splined.isotropic_twobody_energy(r2 as f64))
+            .sum();
+
+        // f32 SIMD results
+        let simd_sum = simd_f32.sum_energies_simd(&distances_f32) as f64;
+
+        let rel_err = ((scalar_sum - simd_sum) / scalar_sum).abs();
+        assert!(
+            rel_err < 1e-5, // f32 precision tolerance
+            "f32 SIMD/f64 scalar mismatch: scalar={}, simd={}, err={}",
+            scalar_sum,
+            simd_sum,
+            rel_err
+        );
+
+        // Also test the lanes() function returns expected value
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(SplineTableSimdF32::lanes(), 4);
+        #[cfg(not(target_arch = "aarch64"))]
+        assert_eq!(SplineTableSimdF32::lanes(), 8);
+    }
+
+    /// Test f32 PowerLaw2 SIMD matches scalar.
+    #[test]
+    fn test_f32_powerlaw2_simd() {
+        let lj = LennardJones::new(1.0, 1.0);
+        let cutoff = 2.5;
+        let config = SplineConfig::default().with_grid_type(GridType::PowerLaw2);
+        let splined = SplinedPotential::with_cutoff(&lj, cutoff, config);
+        let simd_f32 = SplineTableSimdF32::from_spline(&splined);
+
+        let distances: Vec<f32> = (0..100)
+            .map(|i| 0.8f32 + 0.04 * i as f32)
+            .collect();
+
+        let scalar_sum: f32 = distances.iter().map(|&rsq| simd_f32.energy(rsq)).sum();
+        let simd_sum = simd_f32.sum_energies_simd(&distances);
+
+        let rel_err = ((scalar_sum - simd_sum) / scalar_sum).abs();
+        assert!(
+            rel_err < 1e-6,
+            "f32 PowerLaw2 SIMD/scalar mismatch: scalar={}, simd={}, err={}",
+            scalar_sum,
+            simd_sum,
+            rel_err
+        );
     }
 
     /// Test extrapolation with InverseRsq grid.
