@@ -708,6 +708,49 @@ impl SplinedPotential {
         self.r_max * self.r_max
     }
 
+    /// Compute spline interval index and fractional position for a given r² value.
+    ///
+    /// Returns `(index, epsilon)` where `index` is the spline interval and
+    /// `epsilon ∈ [0, 1)` is the fractional position within that interval.
+    /// The input `r` should already be clamped to `[r_min, r_max]`.
+    #[inline]
+    fn compute_index_eps(&self, r: f64) -> (usize, f64) {
+        let t = match self.grid_type {
+            GridType::UniformRsq => {
+                let rsq_min = self.r_min * self.r_min;
+                let rsq = (r * r).max(rsq_min);
+                (rsq - rsq_min) * self.inv_delta
+            }
+            GridType::UniformR => {
+                let r_clamped = r.max(self.r_min);
+                (r_clamped - self.r_min) * self.inv_delta
+            }
+            GridType::PowerLaw(p) => {
+                let r_clamped = r.max(self.r_min).min(self.r_max);
+                let r_range = self.r_max - self.r_min;
+                let x = ((r_clamped - self.r_min) / r_range).powf(1.0 / p);
+                x * (self.n - 1) as f64
+            }
+            GridType::PowerLaw2 => {
+                let r_clamped = r.max(self.r_min).min(self.r_max);
+                let r_range = self.r_max - self.r_min;
+                let x = ((r_clamped - self.r_min) / r_range).sqrt();
+                x * (self.n - 1) as f64
+            }
+            GridType::InverseRsq => {
+                let rsq_min = self.r_min * self.r_min;
+                let rsq_max = self.r_max * self.r_max;
+                let rsq = (r * r).max(rsq_min).min(rsq_max);
+                let w = 1.0 / rsq;
+                let w_min = 1.0 / rsq_max;
+                (w - w_min) * self.inv_delta
+            }
+        };
+        let i = (t as usize).min(self.n - 2);
+        let eps = t - i as f64;
+        (i, eps)
+    }
+
     /// Get table statistics for debugging.
     pub fn stats(&self) -> SplineStats {
         SplineStats {
@@ -812,71 +855,18 @@ impl IsotropicTwobodyEnergy for SplinedPotential {
             return 0.0;
         }
 
-        let rsq_min = self.r_min * self.r_min;
         let r = distance_squared.sqrt();
 
         // Linear extrapolation correction for r < r_min (branchless)
-        // U(r) = U(r_min) + F(r_min) * (r_min - r) for r < r_min
-        // This adds a repulsive linear wall below r_min
         let extrap_dist = (self.r_min - r).max(0.0);
 
-        // Compute index and fractional part based on grid type
-        let (i, eps) = match self.grid_type {
-            GridType::UniformRsq => {
-                // Legacy: uniform in r² space
-                let rsq = distance_squared.max(rsq_min);
-                let t = (rsq - rsq_min) * self.inv_delta;
-                let i = (t as usize).min(self.n - 2);
-                let eps = t - i as f64;
-                (i, eps)
-            }
-            GridType::UniformR => {
-                // Uniform in r space
-                let r_clamped = r.max(self.r_min);
-                let t = (r_clamped - self.r_min) * self.inv_delta;
-                let i = (t as usize).min(self.n - 2);
-                let eps = t - i as f64;
-                (i, eps)
-            }
-            GridType::PowerLaw(p) => {
-                // Inverse mapping: x = ((r - r_min) / (r_max - r_min))^(1/p)
-                let r_clamped = r.max(self.r_min);
-                let r_range = self.r_max - self.r_min;
-                let x = ((r_clamped - self.r_min) / r_range).powf(1.0 / p);
-                let t = x * (self.n - 1) as f64;
-                let i = (t as usize).min(self.n - 2);
-                let eps = t - i as f64;
-                (i, eps)
-            }
-            GridType::PowerLaw2 => {
-                // Optimized p=2: x = sqrt((r - r_min) / (r_max - r_min))
-                let r_clamped = r.max(self.r_min);
-                let r_range = self.r_max - self.r_min;
-                let x = ((r_clamped - self.r_min) / r_range).sqrt(); // sqrt instead of powf(0.5)
-                let t = x * (self.n - 1) as f64;
-                let i = (t as usize).min(self.n - 2);
-                let eps = t - i as f64;
-                (i, eps)
-            }
-            GridType::InverseRsq => {
-                // w = 1/rsq, uniform grid in w-space
-                // w_min = 1/rsq_max, delta stored in self.delta
-                let rsq = distance_squared.max(rsq_min).min(rsq_max);
-                let w = 1.0 / rsq;
-                let w_min = 1.0 / rsq_max;
-                let t = (w - w_min) * self.inv_delta;
-                let i = (t as usize).min(self.n - 2);
-                let eps = t - i as f64;
-                (i, eps)
-            }
-        };
+        let (i, eps) = self.compute_index_eps(r);
 
         // Horner's method for polynomial evaluation
         let c = &self.coeffs[i];
         let u_spline = c.u[0] + eps * (c.u[1] + eps * (c.u[2] + eps * c.u[3]));
 
         // Add linear extrapolation for r < r_min (branchless)
-        // extrap_dist is 0 when r >= r_min, so this adds nothing in the normal case
         u_spline + self.f_at_rmin * extrap_dist
     }
 
@@ -891,53 +881,8 @@ impl IsotropicTwobodyEnergy for SplinedPotential {
             return 0.0;
         }
 
-        let rsq_min = self.r_min * self.r_min;
-
-        let (i, eps) = match self.grid_type {
-            GridType::UniformRsq => {
-                let rsq = distance_squared.max(rsq_min);
-                let t = (rsq - rsq_min) * self.inv_delta;
-                let i = (t as usize).min(self.n - 2);
-                let eps = t - i as f64;
-                (i, eps)
-            }
-            GridType::UniformR => {
-                let r = distance_squared.sqrt().max(self.r_min);
-                let t = (r - self.r_min) * self.inv_delta;
-                let i = (t as usize).min(self.n - 2);
-                let eps = t - i as f64;
-                (i, eps)
-            }
-            GridType::PowerLaw(p) => {
-                let r = distance_squared.sqrt().max(self.r_min);
-                let r_range = self.r_max - self.r_min;
-                let x = ((r - self.r_min) / r_range).powf(1.0 / p);
-                let t = x * (self.n - 1) as f64;
-                let i = (t as usize).min(self.n - 2);
-                let eps = t - i as f64;
-                (i, eps)
-            }
-            GridType::PowerLaw2 => {
-                // Optimized p=2: x = sqrt((r - r_min) / (r_max - r_min))
-                let r = distance_squared.sqrt().max(self.r_min);
-                let r_range = self.r_max - self.r_min;
-                let x = ((r - self.r_min) / r_range).sqrt();
-                let t = x * (self.n - 1) as f64;
-                let i = (t as usize).min(self.n - 2);
-                let eps = t - i as f64;
-                (i, eps)
-            }
-            GridType::InverseRsq => {
-                // w = 1/rsq, uniform grid in w-space
-                let rsq = distance_squared.max(rsq_min).min(rsq_max);
-                let w = 1.0 / rsq;
-                let w_min = 1.0 / rsq_max;
-                let t = (w - w_min) * self.inv_delta;
-                let i = (t as usize).min(self.n - 2);
-                let eps = t - i as f64;
-                (i, eps)
-            }
-        };
+        let r = distance_squared.sqrt();
+        let (i, eps) = self.compute_index_eps(r);
 
         let c = &self.coeffs[i];
         c.f[0] + eps * (c.f[1] + eps * (c.f[2] + eps * c.f[3]))
@@ -1159,6 +1104,45 @@ impl SplineTableSimd {
         }
     }
 
+    /// Compute spline interval index and fractional position for a given r value.
+    #[inline]
+    fn compute_index_eps(&self, r: f64) -> (usize, f64) {
+        let t = match self.grid_type {
+            GridType::UniformRsq => {
+                let rsq_min = self.r_min * self.r_min;
+                let rsq = (r * r).max(rsq_min);
+                (rsq - rsq_min) * self.inv_delta
+            }
+            GridType::UniformR => {
+                let r_clamped = r.max(self.r_min);
+                (r_clamped - self.r_min) * self.inv_delta
+            }
+            GridType::PowerLaw(p) => {
+                let r_clamped = r.max(self.r_min).min(self.r_max);
+                let r_range = self.r_max - self.r_min;
+                let x = ((r_clamped - self.r_min) / r_range).powf(1.0 / p);
+                x * (self.n - 1) as f64
+            }
+            GridType::PowerLaw2 => {
+                let r_clamped = r.max(self.r_min).min(self.r_max);
+                let r_range = self.r_max - self.r_min;
+                let x = ((r_clamped - self.r_min) / r_range).sqrt();
+                x * (self.n - 1) as f64
+            }
+            GridType::InverseRsq => {
+                let rsq_min = self.r_min * self.r_min;
+                let rsq_max = self.r_max * self.r_max;
+                let rsq = (r * r).max(rsq_min).min(rsq_max);
+                let w = 1.0 / rsq;
+                let w_min = 1.0 / rsq_max;
+                (w - w_min) * self.inv_delta
+            }
+        };
+        let i = (t as usize).min(self.n - 2);
+        let eps = t - i as f64;
+        (i, eps)
+    }
+
     /// Evaluate energy for a single distance (scalar fallback).
     /// Linearly extrapolates below r_min to maintain repulsive behavior.
     #[inline]
@@ -1169,56 +1153,8 @@ impl SplineTableSimd {
         }
 
         let r = rsq.sqrt();
-
-        // Linear extrapolation distance (0 if r >= r_min)
         let extrap_dist = (self.r_min - r).max(0.0);
-
-        let (i, eps) = match self.grid_type {
-            GridType::UniformRsq => {
-                let rsq_min = self.r_min * self.r_min;
-                let rsq_clamped = rsq.max(rsq_min);
-                let t = (rsq_clamped - rsq_min) * self.inv_delta;
-                let i = (t as usize).min(self.n - 2);
-                let eps = t - i as f64;
-                (i, eps)
-            }
-            GridType::UniformR => {
-                let r_clamped = r.max(self.r_min);
-                let t = (r_clamped - self.r_min) * self.inv_delta;
-                let i = (t as usize).min(self.n - 2);
-                let eps = t - i as f64;
-                (i, eps)
-            }
-            GridType::PowerLaw(p) => {
-                let r_clamped = r.max(self.r_min);
-                let r_range = self.r_max - self.r_min;
-                let x = ((r_clamped - self.r_min) / r_range).powf(1.0 / p);
-                let t = x * (self.n - 1) as f64;
-                let i = (t as usize).min(self.n - 2);
-                let eps = t - i as f64;
-                (i, eps)
-            }
-            GridType::PowerLaw2 => {
-                let r_clamped = r.max(self.r_min);
-                let r_range = self.r_max - self.r_min;
-                let x = ((r_clamped - self.r_min) / r_range).sqrt();
-                let t = x * (self.n - 1) as f64;
-                let i = (t as usize).min(self.n - 2);
-                let eps = t - i as f64;
-                (i, eps)
-            }
-            GridType::InverseRsq => {
-                let rsq_min = self.r_min * self.r_min;
-                let rsq_max = self.r_max * self.r_max;
-                let rsq_clamped = rsq.max(rsq_min).min(rsq_max);
-                let w = 1.0 / rsq_clamped;
-                let w_min = 1.0 / rsq_max;
-                let t = (w - w_min) * self.inv_delta;
-                let i = (t as usize).min(self.n - 2);
-                let eps = t - i as f64;
-                (i, eps)
-            }
-        };
+        let (i, eps) = self.compute_index_eps(r);
 
         // Horner's method + linear extrapolation
         let u_spline = self.u0[i] + eps * (self.u1[i] + eps * (self.u2[i] + eps * self.u3[i]));
@@ -1485,6 +1421,45 @@ impl SplineTableSimdF32 {
         LANES_F32
     }
 
+    /// Compute spline interval index and fractional position for a given r value.
+    #[inline]
+    fn compute_index_eps(&self, r: f32) -> (usize, f32) {
+        let t = match self.grid_type {
+            GridType::UniformRsq => {
+                let rsq_min = self.r_min * self.r_min;
+                let rsq = (r * r).max(rsq_min);
+                (rsq - rsq_min) * self.inv_delta
+            }
+            GridType::UniformR => {
+                let r_clamped = r.max(self.r_min);
+                (r_clamped - self.r_min) * self.inv_delta
+            }
+            GridType::PowerLaw(p) => {
+                let r_clamped = r.max(self.r_min).min(self.r_max);
+                let r_range = self.r_max - self.r_min;
+                let x = ((r_clamped - self.r_min) / r_range).powf(1.0 / p as f32);
+                x * (self.n - 1) as f32
+            }
+            GridType::PowerLaw2 => {
+                let r_clamped = r.max(self.r_min).min(self.r_max);
+                let r_range = self.r_max - self.r_min;
+                let x = ((r_clamped - self.r_min) / r_range).sqrt();
+                x * (self.n - 1) as f32
+            }
+            GridType::InverseRsq => {
+                let rsq_min = self.r_min * self.r_min;
+                let rsq_max = self.r_max * self.r_max;
+                let rsq = (r * r).max(rsq_min).min(rsq_max);
+                let w = 1.0 / rsq;
+                let w_min = 1.0 / rsq_max;
+                (w - w_min) * self.inv_delta
+            }
+        };
+        let i = (t as usize).min(self.n - 2);
+        let eps = t - i as f32;
+        (i, eps)
+    }
+
     /// Evaluate energy for a single distance (scalar).
     #[inline]
     pub fn energy(&self, rsq: f32) -> f32 {
@@ -1495,48 +1470,7 @@ impl SplineTableSimdF32 {
 
         let r = rsq.sqrt();
         let extrap_dist = (self.r_min - r).max(0.0);
-
-        let (i, eps) = match self.grid_type {
-            GridType::UniformRsq => {
-                let rsq_min = self.r_min * self.r_min;
-                let rsq_clamped = rsq.max(rsq_min);
-                let t = (rsq_clamped - rsq_min) * self.inv_delta;
-                let i = (t as usize).min(self.n - 2);
-                (i, t - i as f32)
-            }
-            GridType::UniformR => {
-                let r_clamped = r.max(self.r_min);
-                let t = (r_clamped - self.r_min) * self.inv_delta;
-                let i = (t as usize).min(self.n - 2);
-                (i, t - i as f32)
-            }
-            GridType::PowerLaw(p) => {
-                let r_clamped = r.max(self.r_min).min(self.r_max);
-                let r_range = self.r_max - self.r_min;
-                let x = ((r_clamped - self.r_min) / r_range).powf(1.0 / p as f32);
-                let t = x * (self.n - 1) as f32;
-                let i = (t as usize).min(self.n - 2);
-                (i, t - i as f32)
-            }
-            GridType::PowerLaw2 => {
-                let r_clamped = r.max(self.r_min).min(self.r_max);
-                let r_range = self.r_max - self.r_min;
-                let x = ((r_clamped - self.r_min) / r_range).sqrt();
-                let t = x * (self.n - 1) as f32;
-                let i = (t as usize).min(self.n - 2);
-                (i, t - i as f32)
-            }
-            GridType::InverseRsq => {
-                let rsq_min = self.r_min * self.r_min;
-                let rsq_max = self.r_max * self.r_max;
-                let rsq_clamped = rsq.max(rsq_min).min(rsq_max);
-                let w = 1.0 / rsq_clamped;
-                let w_min = 1.0 / rsq_max;
-                let t = (w - w_min) * self.inv_delta;
-                let i = (t as usize).min(self.n - 2);
-                (i, t - i as f32)
-            }
-        };
+        let (i, eps) = self.compute_index_eps(r);
 
         let c = &self.coeffs[i];
         let u_spline = c[0] + eps * (c[1] + eps * (c[2] + eps * c[3]));
