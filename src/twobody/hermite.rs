@@ -281,148 +281,73 @@ impl SplinedPotential {
             0.0
         };
 
-        // Build grid based on grid type
-        let (delta, rsq_vals, u_vals, f_vals) = match config.grid_type {
+        // Build grid: compute (delta, grid_point_fn) based on grid type
+        let r_range = r_max - r_min;
+        let n_f64 = (n - 1) as f64;
+
+        // Grid point generator: returns (r, rsq) for grid index i
+        let (delta, grid_point): (f64, Box<dyn Fn(usize) -> (f64, f64)>) = match config.grid_type {
             GridType::UniformRsq => {
-                // Legacy: uniform in r² space
-                let delta_rsq = (rsq_max - rsq_min) / (n - 1) as f64;
-                let mut rsq_vals = Vec::with_capacity(n);
-                let mut u_vals = Vec::with_capacity(n);
-                let mut f_vals = Vec::with_capacity(n);
-
-                for i in 0..n {
+                let delta_rsq = (rsq_max - rsq_min) / n_f64;
+                (delta_rsq, Box::new(move |i| {
                     let rsq = rsq_min + i as f64 * delta_rsq;
-                    rsq_vals.push(rsq);
-
-                    let mut u = potential.isotropic_twobody_energy(rsq) - energy_shift;
-                    let mut f = potential.isotropic_twobody_force(rsq);
-
-                    if config.shift_force {
-                        let r = rsq.sqrt();
-                        u -= (r - r_max) * force_shift;
-                        f -= force_shift;
-                    }
-
-                    u_vals.push(u);
-                    f_vals.push(f);
-                }
-                (delta_rsq, rsq_vals, u_vals, f_vals)
+                    (rsq.sqrt(), rsq)
+                }))
             }
             GridType::UniformR => {
-                // Uniform in r space
-                let delta_r = (r_max - r_min) / (n - 1) as f64;
-                let mut rsq_vals = Vec::with_capacity(n);
-                let mut u_vals = Vec::with_capacity(n);
-                let mut f_vals = Vec::with_capacity(n);
-
-                for i in 0..n {
+                let delta_r = r_range / n_f64;
+                (delta_r, Box::new(move |i| {
                     let r = r_min + i as f64 * delta_r;
-                    let rsq = r * r;
-                    rsq_vals.push(rsq);
-
-                    let mut u = potential.isotropic_twobody_energy(rsq) - energy_shift;
-                    let mut f = potential.isotropic_twobody_force(rsq);
-
-                    if config.shift_force {
-                        u -= (r - r_max) * force_shift;
-                        f -= force_shift;
-                    }
-
-                    u_vals.push(u);
-                    f_vals.push(f);
-                }
-                (delta_r, rsq_vals, u_vals, f_vals)
+                    (r, r * r)
+                }))
             }
             GridType::PowerLaw(p) => {
-                // Power-law mapping: r(x) = r_min + (r_max - r_min) * x^p
-                // where x = i/(n-1) ∈ [0, 1]. For p > 1, denser at short range.
                 assert!(p > 0.0, "Power-law exponent must be positive");
-                let r_range = r_max - r_min;
-                let mut rsq_vals = Vec::with_capacity(n);
-                let mut u_vals = Vec::with_capacity(n);
-                let mut f_vals = Vec::with_capacity(n);
-
-                for i in 0..n {
-                    let x = i as f64 / (n - 1) as f64;
+                (p, Box::new(move |i| {
+                    let x = i as f64 / n_f64;
                     let r = r_min + r_range * x.powf(p);
-                    let rsq = r * r;
-                    rsq_vals.push(rsq);
-
-                    let mut u = potential.isotropic_twobody_energy(rsq) - energy_shift;
-                    let mut f = potential.isotropic_twobody_force(rsq);
-
-                    if config.shift_force {
-                        u -= (r - r_max) * force_shift;
-                        f -= force_shift;
-                    }
-
-                    u_vals.push(u);
-                    f_vals.push(f);
-                }
-                // Store p in delta field for use in evaluation
-                (p, rsq_vals, u_vals, f_vals)
+                    (r, r * r)
+                }))
             }
             GridType::PowerLaw2 => {
-                // Optimized power-law mapping with p=2: r(x) = r_min + (r_max - r_min) * x²
-                // Uses x*x instead of powf(2.0) for efficiency.
-                let r_range = r_max - r_min;
-                let mut rsq_vals = Vec::with_capacity(n);
-                let mut u_vals = Vec::with_capacity(n);
-                let mut f_vals = Vec::with_capacity(n);
-
-                for i in 0..n {
-                    let x = i as f64 / (n - 1) as f64;
-                    let r = r_min + r_range * x * x; // x² instead of x.powf(2.0)
-                    let rsq = r * r;
-                    rsq_vals.push(rsq);
-
-                    let mut u = potential.isotropic_twobody_energy(rsq) - energy_shift;
-                    let mut f = potential.isotropic_twobody_force(rsq);
-
-                    if config.shift_force {
-                        u -= (r - r_max) * force_shift;
-                        f -= force_shift;
-                    }
-
-                    u_vals.push(u);
-                    f_vals.push(f);
-                }
-                // Store p=2.0 in delta field for use in evaluation
-                (2.0, rsq_vals, u_vals, f_vals)
+                (2.0, Box::new(move |i| {
+                    let x = i as f64 / n_f64;
+                    let r = r_min + r_range * x * x;
+                    (r, r * r)
+                }))
             }
             GridType::InverseRsq => {
-                // Uniform grid in w = 1/rsq space (inverse squared distance).
-                // This transforms LJ to polynomial form: U ∝ w⁶ - w³
-                // w_min = 1/rsq_max (long range), w_max = 1/rsq_min (short range)
                 let w_min = 1.0 / rsq_max;
                 let w_max = 1.0 / rsq_min;
-                let delta_w = (w_max - w_min) / (n - 1) as f64;
-
-                let mut rsq_vals = Vec::with_capacity(n);
-                let mut u_vals = Vec::with_capacity(n);
-                let mut f_vals = Vec::with_capacity(n);
-
-                for i in 0..n {
+                let delta_w = (w_max - w_min) / n_f64;
+                (delta_w, Box::new(move |i| {
                     let w = w_min + i as f64 * delta_w;
                     let rsq = 1.0 / w;
-                    let r = rsq.sqrt();
-                    rsq_vals.push(rsq);
-
-                    let mut u = potential.isotropic_twobody_energy(rsq) - energy_shift;
-                    let mut f = potential.isotropic_twobody_force(rsq);
-
-                    if config.shift_force {
-                        u -= (r - r_max) * force_shift;
-                        f -= force_shift;
-                    }
-
-                    u_vals.push(u);
-                    f_vals.push(f);
-                }
-                // Store delta_w for use in evaluation
-                (delta_w, rsq_vals, u_vals, f_vals)
+                    (rsq.sqrt(), rsq)
+                }))
             }
         };
+
+        // Generate grid points and evaluate potential
+        let mut rsq_vals = Vec::with_capacity(n);
+        let mut u_vals = Vec::with_capacity(n);
+        let mut f_vals = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let (r, rsq) = grid_point(i);
+            rsq_vals.push(rsq);
+
+            let mut u = potential.isotropic_twobody_energy(rsq) - energy_shift;
+            let mut f = potential.isotropic_twobody_force(rsq);
+
+            if config.shift_force {
+                u -= (r - r_max) * force_shift;
+                f -= force_shift;
+            }
+
+            u_vals.push(u);
+            f_vals.push(f);
+        }
 
         let inv_delta = 1.0 / delta;
 
@@ -468,76 +393,81 @@ impl SplinedPotential {
         f: &[f64],
         grid_type: GridType,
     ) -> Vec<SplineCoeffs> {
+        /// Compute cubic Hermite polynomial coefficients for an interval.
+        ///
+        /// Given values v0, v1 and derivatives dv0, dv1 at endpoints, returns
+        /// coefficients [c0, c1, c2, c3] for: V(ε) = c0 + c1·ε + c2·ε² + c3·ε³
+        #[inline]
+        fn hermite_coeffs(v0: f64, v1: f64, dv0: f64, dv1: f64, delta: f64) -> [f64; 4] {
+            [
+                v0,
+                delta * dv0,
+                3.0 * (v1 - v0) - delta * (2.0 * dv0 + dv1),
+                2.0 * (v0 - v1) + delta * (dv0 + dv1),
+            ]
+        }
+
+        /// Compute finite difference derivative at index i using central differences.
+        #[inline]
+        fn finite_diff_deriv(
+            values: &[f64],
+            coords: &[f64],
+            i: usize,
+            i_next: usize,
+            delta_default: f64,
+        ) -> f64 {
+            let n = values.len();
+            if i > 0 {
+                (values[i_next] - values[i - 1]) / (coords[i_next] - coords[i - 1])
+            } else if i_next + 1 < n {
+                (values[i_next] - values[i]) / delta_default
+            } else {
+                (values[i_next] - values[i]) / delta_default
+            }
+        }
+
         let n = rsq.len();
         let mut coeffs = Vec::with_capacity(n);
 
         for i in 0..n.saturating_sub(1) {
             let r_i = rsq[i].sqrt();
             let r_i1 = rsq[i + 1].sqrt();
-            let delta_r = r_i1 - r_i;
 
-            // Energy values at interval endpoints
             let u_i = u[i];
             let u_i1 = u[i + 1];
-
-            // Force values (F = -dU/dr)
             let f_i = f[i];
             let f_i1 = f[i + 1];
 
-            let (a0, a1, a2, a3, b0, b1, b2, b3) = match grid_type {
+            let (u_coeffs, f_coeffs) = match grid_type {
                 GridType::UniformRsq => {
-                    // Legacy: polynomial in rsq-space
                     let delta_rsq = rsq[i + 1] - rsq[i];
 
                     // dU/d(rsq) = dU/dr · dr/d(rsq) = -F(r) / (2r)
                     let duds_i = if r_i > 1e-10 { -f_i / (2.0 * r_i) } else { 0.0 };
-                    let duds_i1 = if r_i1 > 1e-10 {
-                        -f_i1 / (2.0 * r_i1)
-                    } else {
-                        0.0
-                    };
-
-                    let a0 = u_i;
-                    let a1 = delta_rsq * duds_i;
-                    let a2 = 3.0 * (u_i1 - u_i) - delta_rsq * (2.0 * duds_i + duds_i1);
-                    let a3 = 2.0 * (u_i - u_i1) + delta_rsq * (duds_i + duds_i1);
+                    let duds_i1 = if r_i1 > 1e-10 { -f_i1 / (2.0 * r_i1) } else { 0.0 };
 
                     // df/d(rsq) using finite differences
-                    let dfds_i = if i > 0 {
-                        let delta_prev = rsq[i + 1] - rsq[i.saturating_sub(1)];
-                        (f[i + 1] - f[i.saturating_sub(1)]) / delta_prev
-                    } else {
-                        (f_i1 - f_i) / delta_rsq
-                    };
+                    let dfds_i = finite_diff_deriv(f, rsq, i, i + 1, delta_rsq);
                     let dfds_i1 = if i + 2 < n {
-                        let delta_next = rsq[i + 2] - rsq[i];
-                        (f[i + 2] - f[i]) / delta_next
+                        (f[i + 2] - f[i]) / (rsq[i + 2] - rsq[i])
                     } else {
                         (f_i1 - f_i) / delta_rsq
                     };
 
-                    let b0 = f_i;
-                    let b1 = delta_rsq * dfds_i;
-                    let b2 = 3.0 * (f_i1 - f_i) - delta_rsq * (2.0 * dfds_i + dfds_i1);
-                    let b3 = 2.0 * (f_i - f_i1) + delta_rsq * (dfds_i + dfds_i1);
-
-                    (a0, a1, a2, a3, b0, b1, b2, b3)
+                    (
+                        hermite_coeffs(u_i, u_i1, duds_i, duds_i1, delta_rsq),
+                        hermite_coeffs(f_i, f_i1, dfds_i, dfds_i1, delta_rsq),
+                    )
                 }
                 GridType::UniformR => {
-                    // Recommended: polynomial in r-space
-                    // dU/dr = -F(r), so derivatives are simply -f
+                    let delta_r = r_i1 - r_i;
                     let dudr_i = -f_i;
                     let dudr_i1 = -f_i1;
 
-                    let a0 = u_i;
-                    let a1 = delta_r * dudr_i;
-                    let a2 = 3.0 * (u_i1 - u_i) - delta_r * (2.0 * dudr_i + dudr_i1);
-                    let a3 = 2.0 * (u_i - u_i1) + delta_r * (dudr_i + dudr_i1);
-
-                    // df/dr using finite differences
+                    // Build r array for finite differences
                     let dfdr_i = if i > 0 {
-                        let r_prev = rsq[i.saturating_sub(1)].sqrt();
-                        (f_i1 - f[i.saturating_sub(1)]) / (r_i1 - r_prev)
+                        let r_prev = rsq[i - 1].sqrt();
+                        (f_i1 - f[i - 1]) / (r_i1 - r_prev)
                     } else {
                         (f_i1 - f_i) / delta_r
                     };
@@ -548,84 +478,43 @@ impl SplinedPotential {
                         (f_i1 - f_i) / delta_r
                     };
 
-                    let b0 = f_i;
-                    let b1 = delta_r * dfdr_i;
-                    let b2 = 3.0 * (f_i1 - f_i) - delta_r * (2.0 * dfdr_i + dfdr_i1);
-                    let b3 = 2.0 * (f_i - f_i1) + delta_r * (dfdr_i + dfdr_i1);
-
-                    (a0, a1, a2, a3, b0, b1, b2, b3)
+                    (
+                        hermite_coeffs(u_i, u_i1, dudr_i, dudr_i1, delta_r),
+                        hermite_coeffs(f_i, f_i1, dfdr_i, dfdr_i1, delta_r),
+                    )
                 }
-                GridType::PowerLaw(p) => {
+                GridType::PowerLaw(_) | GridType::PowerLaw2 => {
                     // Polynomial in x-space where x = ((r - r_min)/(r_max - r_min))^(1/p)
-                    // Grid is uniform in x with Δx = 1/(n-1)
+                    // PowerLaw2 is optimized p=2 case
+                    let p = match grid_type {
+                        GridType::PowerLaw2 => 2.0,
+                        GridType::PowerLaw(p) => p,
+                        _ => unreachable!(),
+                    };
+
                     let delta_x = 1.0 / (n - 1) as f64;
                     let x_i = i as f64 * delta_x;
                     let x_i1 = (i + 1) as f64 * delta_x;
-
-                    // dU/dx = dU/dr * dr/dx, where dr/dx = p * (r_max - r_min) * x^(p-1)
-                    // At x_i and x_{i+1}:
                     let r_range = rsq.last().unwrap().sqrt() - rsq.first().unwrap().sqrt();
-                    let drdx_i = if x_i > 1e-10 {
-                        p * r_range * x_i.powf(p - 1.0)
+
+                    // dr/dx = p * r_range * x^(p-1)
+                    // For p=2: dr/dx = 2 * r_range * x (optimized, no powf)
+                    let (drdx_i, drdx_i1) = if (p - 2.0).abs() < 1e-10 {
+                        let drdx_i = if x_i > 1e-10 { 2.0 * r_range * x_i } else { 2.0 * r_range * 1e-10 };
+                        let drdx_i1 = 2.0 * r_range * x_i1;
+                        (drdx_i, drdx_i1)
                     } else {
-                        // At x=0, dr/dx → 0 for p > 1, handle gracefully
-                        p * r_range * (1e-10_f64).powf(p - 1.0)
+                        let drdx_i = if x_i > 1e-10 {
+                            p * r_range * x_i.powf(p - 1.0)
+                        } else {
+                            p * r_range * (1e-10_f64).powf(p - 1.0)
+                        };
+                        let drdx_i1 = p * r_range * x_i1.powf(p - 1.0);
+                        (drdx_i, drdx_i1)
                     };
-                    let drdx_i1 = p * r_range * x_i1.powf(p - 1.0);
-
-                    // dU/dr = -F, so dU/dx = -F * dr/dx
-                    let dudx_i = -f_i * drdx_i;
-                    let dudx_i1 = -f_i1 * drdx_i1;
-
-                    let a0 = u_i;
-                    let a1 = delta_x * dudx_i;
-                    let a2 = 3.0 * (u_i1 - u_i) - delta_x * (2.0 * dudx_i + dudx_i1);
-                    let a3 = 2.0 * (u_i - u_i1) + delta_x * (dudx_i + dudx_i1);
-
-                    // For force, use same approach
-                    // df/dx = df/dr * dr/dx
-                    let dfdx_i = if i > 0 {
-                        let x_prev = (i - 1) as f64 * delta_x;
-                        (f_i1 - f[i - 1]) / (x_i1 - x_prev)
-                    } else {
-                        (f_i1 - f_i) / delta_x
-                    };
-                    let dfdx_i1 = if i + 2 < n {
-                        let x_next = (i + 2) as f64 * delta_x;
-                        (f[i + 2] - f_i) / (x_next - x_i)
-                    } else {
-                        (f_i1 - f_i) / delta_x
-                    };
-
-                    let b0 = f_i;
-                    let b1 = delta_x * dfdx_i;
-                    let b2 = 3.0 * (f_i1 - f_i) - delta_x * (2.0 * dfdx_i + dfdx_i1);
-                    let b3 = 2.0 * (f_i - f_i1) + delta_x * (dfdx_i + dfdx_i1);
-
-                    (a0, a1, a2, a3, b0, b1, b2, b3)
-                }
-                GridType::PowerLaw2 => {
-                    // Optimized p=2 case: dr/dx = 2 * r_range * x (since x^(p-1) = x^1 = x)
-                    let delta_x = 1.0 / (n - 1) as f64;
-                    let x_i = i as f64 * delta_x;
-                    let x_i1 = (i + 1) as f64 * delta_x;
-
-                    let r_range = rsq.last().unwrap().sqrt() - rsq.first().unwrap().sqrt();
-                    // dr/dx = 2 * r_range * x for p=2
-                    let drdx_i = if x_i > 1e-10 {
-                        2.0 * r_range * x_i
-                    } else {
-                        2.0 * r_range * 1e-10
-                    };
-                    let drdx_i1 = 2.0 * r_range * x_i1;
 
                     let dudx_i = -f_i * drdx_i;
                     let dudx_i1 = -f_i1 * drdx_i1;
-
-                    let a0 = u_i;
-                    let a1 = delta_x * dudx_i;
-                    let a2 = 3.0 * (u_i1 - u_i) - delta_x * (2.0 * dudx_i + dudx_i1);
-                    let a3 = 2.0 * (u_i - u_i1) + delta_x * (dudx_i + dudx_i1);
 
                     let dfdx_i = if i > 0 {
                         let x_prev = (i - 1) as f64 * delta_x;
@@ -640,32 +529,20 @@ impl SplinedPotential {
                         (f_i1 - f_i) / delta_x
                     };
 
-                    let b0 = f_i;
-                    let b1 = delta_x * dfdx_i;
-                    let b2 = 3.0 * (f_i1 - f_i) - delta_x * (2.0 * dfdx_i + dfdx_i1);
-                    let b3 = 2.0 * (f_i - f_i1) + delta_x * (dfdx_i + dfdx_i1);
-
-                    (a0, a1, a2, a3, b0, b1, b2, b3)
+                    (
+                        hermite_coeffs(u_i, u_i1, dudx_i, dudx_i1, delta_x),
+                        hermite_coeffs(f_i, f_i1, dfdx_i, dfdx_i1, delta_x),
+                    )
                 }
                 GridType::InverseRsq => {
-                    // Polynomial in w-space where w = 1/rsq
-                    // Grid is uniform in w with Δw computed from rsq values
                     let w_i = 1.0 / rsq[i];
                     let w_i1 = 1.0 / rsq[i + 1];
-                    let delta_w = w_i1 - w_i; // Note: w increases as rsq decreases
+                    let delta_w = w_i1 - w_i;
 
-                    // dU/dw = dU/dr * dr/dw
-                    // r = rsq^(1/2) = w^(-1/2), so dr/dw = -1/(2*w^(3/2)) = -r³/2
-                    // Since dU/dr = -F: dU/dw = -F * (-r³/2) = F * r³ / 2
+                    // dU/dw = F * r³ / 2 (derived from chain rule)
                     let dudw_i = f_i * r_i * r_i * r_i / 2.0;
                     let dudw_i1 = f_i1 * r_i1 * r_i1 * r_i1 / 2.0;
 
-                    let a0 = u_i;
-                    let a1 = delta_w * dudw_i;
-                    let a2 = 3.0 * (u_i1 - u_i) - delta_w * (2.0 * dudw_i + dudw_i1);
-                    let a3 = 2.0 * (u_i - u_i1) + delta_w * (dudw_i + dudw_i1);
-
-                    // df/dw using finite differences in w-space
                     let dfdw_i = if i > 0 {
                         let w_prev = 1.0 / rsq[i - 1];
                         (f_i1 - f[i - 1]) / (w_i1 - w_prev)
@@ -679,18 +556,16 @@ impl SplinedPotential {
                         (f_i1 - f_i) / delta_w
                     };
 
-                    let b0 = f_i;
-                    let b1 = delta_w * dfdw_i;
-                    let b2 = 3.0 * (f_i1 - f_i) - delta_w * (2.0 * dfdw_i + dfdw_i1);
-                    let b3 = 2.0 * (f_i - f_i1) + delta_w * (dfdw_i + dfdw_i1);
-
-                    (a0, a1, a2, a3, b0, b1, b2, b3)
+                    (
+                        hermite_coeffs(u_i, u_i1, dudw_i, dudw_i1, delta_w),
+                        hermite_coeffs(f_i, f_i1, dfdw_i, dfdw_i1, delta_w),
+                    )
                 }
             };
 
             coeffs.push(SplineCoeffs {
-                u: [a0, a1, a2, a3],
-                f: [b0, b1, b2, b3],
+                u: u_coeffs,
+                f: f_coeffs,
             });
         }
 
