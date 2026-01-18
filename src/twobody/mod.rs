@@ -24,6 +24,7 @@ use core::ops::Add;
 use dyn_clone::DynClone;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 mod ashbaugh_hatch;
 mod fene;
@@ -189,6 +190,35 @@ impl IsotropicTwobodyEnergy for Box<dyn IsotropicTwobodyEnergy> {
     }
 }
 
+/// Thread-safe shared wrapper for dynamic isotropic potentials.
+///
+/// This is a newtype wrapper around `Arc<dyn IsotropicTwobodyEnergy>` that
+/// implements `IsotropicTwobodyEnergy`, working around Rust's orphan rules
+/// which prevent implementing foreign traits for `Arc<T>` directly.
+#[derive(Clone, Debug)]
+pub struct ArcPotential(pub Arc<dyn IsotropicTwobodyEnergy>);
+
+impl ArcPotential {
+    pub fn new<T: IsotropicTwobodyEnergy + 'static>(potential: T) -> Self {
+        Self(Arc::new(potential))
+    }
+}
+
+impl Cutoff for ArcPotential {
+    fn cutoff(&self) -> f64 {
+        self.0.cutoff()
+    }
+    fn lower_cutoff(&self) -> f64 {
+        self.0.lower_cutoff()
+    }
+}
+
+impl IsotropicTwobodyEnergy for ArcPotential {
+    fn isotropic_twobody_energy(&self, distance_squared: f64) -> f64 {
+        self.0.isotropic_twobody_energy(distance_squared)
+    }
+}
+
 impl Add for Box<dyn IsotropicTwobodyEnergy> {
     type Output = Self;
     fn add(self, other: Self) -> Self {
@@ -263,5 +293,37 @@ pub fn test_combined() {
         combined2.anisotropic_twobody_energy(&relative_orientation),
         energy.0 + energy.1 + energy3,
         epsilon = 1e-7
+    );
+}
+
+#[test]
+fn test_arc_potential() {
+    use approx::assert_relative_eq;
+
+    let lj = LennardJones::new(1.0, 1.0);
+    let r2 = 1.5_f64.powi(2);
+    let expected_energy = lj.isotropic_twobody_energy(r2);
+    let expected_cutoff = lj.cutoff();
+    let expected_lower_cutoff = lj.lower_cutoff();
+
+    // Create ArcPotential and verify it delegates correctly
+    let arc_pot = ArcPotential::new(lj);
+    assert_relative_eq!(arc_pot.isotropic_twobody_energy(r2), expected_energy);
+    assert_eq!(arc_pot.cutoff(), expected_cutoff);
+    assert_relative_eq!(arc_pot.lower_cutoff(), expected_lower_cutoff);
+
+    // Verify Clone works (cheap Arc clone)
+    let cloned = arc_pot.clone();
+    assert_relative_eq!(cloned.isotropic_twobody_energy(r2), expected_energy);
+
+    // Verify it works with anisotropic interface
+    let orientation = RelativeOrientation {
+        distance: Vector3::new(1.5, 0.0, 0.0),
+        orientation: Vector3::new(0.0, 1.0, 0.0),
+    };
+    assert_relative_eq!(
+        arc_pot.anisotropic_twobody_energy(&orientation),
+        expected_energy,
+        epsilon = 1e-10
     );
 }
