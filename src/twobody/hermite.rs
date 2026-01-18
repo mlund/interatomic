@@ -1666,8 +1666,17 @@ impl SplineTableSimdF32 {
     /// Evaluate energies using architecture-optimal SIMD width.
     ///
     /// Uses f32x8 on x86_64 (AVX2), f32x4 on aarch64 (NEON).
+    /// Dispatches to optimized implementations for PowerLaw2 and InverseRsq.
     #[inline]
     pub fn energy_simd(&self, rsq: SimdF32) -> SimdF32 {
+        // Fast path for common grid types
+        match self.grid_type {
+            GridType::PowerLaw2 => return self.energy_simd_powerlaw2(rsq),
+            GridType::InverseRsq => return self.energy_simd_inversersq(rsq),
+            _ => {}
+        }
+
+        // Generic path for other grid types
         let rsq_max = SimdF32::splat(self.r_max * self.r_max);
         let zero = SimdF32::ZERO;
 
@@ -1800,6 +1809,57 @@ impl SplineTableSimdF32 {
         let t = x * n_minus_1;
 
         // Extract indices and evaluate Horner per-lane (better for non-uniform indices)
+        let t_arr = simd_f32_to_array(t);
+        let max_idx = self.n - 2;
+        let mut energies: SimdArrayF32 = [0.0; LANES_F32];
+
+        for lane in 0..LANES_F32 {
+            let i = (t_arr[lane] as usize).min(max_idx);
+            let eps = t_arr[lane] - i as f32;
+            let c = &self.coeffs[i];
+            // Horner's method: c0 + eps*(c1 + eps*(c2 + eps*c3))
+            energies[lane] = c[0] + eps * (c[1] + eps * (c[2] + eps * c[3]));
+        }
+
+        // Apply cutoff mask
+        cutoff_mask.blend(simd_f32_from_array(energies), zero)
+    }
+
+    /// Fast SIMD energy evaluation optimized for InverseRsq grid.
+    ///
+    /// This method is optimized for InverseRsq grid type which avoids sqrt
+    /// entirely by using w = 1/rsq as the grid variable. This can be faster
+    /// than PowerLaw2 for short-range potentials.
+    #[inline]
+    pub fn energy_simd_inversersq(&self, rsq: SimdF32) -> SimdF32 {
+        debug_assert!(
+            matches!(self.grid_type, GridType::InverseRsq),
+            "energy_simd_inversersq requires InverseRsq grid"
+        );
+
+        let rsq_max = SimdF32::splat(self.r_max * self.r_max);
+        let zero = SimdF32::ZERO;
+
+        // Early exit if all distances are beyond cutoff
+        let cutoff_mask = rsq.cmp_lt(rsq_max);
+        if cutoff_mask.none() {
+            return zero;
+        }
+
+        let rsq_min = self.r_min * self.r_min;
+        let rsq_max_scalar = self.r_max * self.r_max;
+        let rsq_min_v = SimdF32::splat(rsq_min);
+        let rsq_max_v = SimdF32::splat(rsq_max_scalar);
+        let w_min = SimdF32::splat(1.0 / rsq_max_scalar);
+        let inv_delta = SimdF32::splat(self.inv_delta);
+        let one = SimdF32::splat(1.0);
+
+        // InverseRsq grid: no sqrt needed!
+        let rsq_clamped = rsq.max(rsq_min_v).min(rsq_max_v);
+        let w = one / rsq_clamped;
+        let t = (w - w_min) * inv_delta;
+
+        // Extract indices and evaluate Horner per-lane
         let t_arr = simd_f32_to_array(t);
         let max_idx = self.n - 2;
         let mut energies: SimdArrayF32 = [0.0; LANES_F32];
