@@ -257,7 +257,7 @@ impl SplinedPotential {
         let rsq_max = config.rsq_max.unwrap_or(cutoff * cutoff);
         // Use lower_cutoff from potential if rsq_min not explicitly set
         let lower = potential.lower_cutoff();
-        let rsq_min = config.rsq_min.unwrap_or_else(|| lower * lower).max(1e-10); // Avoid zero/negative values
+        let rsq_min = config.rsq_min.unwrap_or(lower * lower).max(1e-10); // Avoid zero/negative values
 
         assert!(rsq_min < rsq_max, "rsq_min must be less than rsq_max");
 
@@ -1372,8 +1372,8 @@ impl SplineTableSimd {
         let mut total = arr[0] + arr[1] + arr[2] + arr[3];
 
         // Handle remainder with scalar
-        for i in (chunks * 4)..n {
-            total += self.energy(rsq_values[i]);
+        for rsq in rsq_values.iter().take(n).skip(chunks * 4) {
+            total += self.energy(*rsq);
         }
 
         total

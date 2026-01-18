@@ -14,6 +14,7 @@
 
 //! Implementation of the Morse potential.
 
+use crate::Cutoff;
 use super::IsotropicTwobodyEnergy;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -50,5 +51,11 @@ impl IsotropicTwobodyEnergy for Morse {
     #[inline(always)]
     fn isotropic_twobody_energy(&self, _distance_squared: f64) -> f64 {
         todo!("Morse potential is not yet implemented");
+    }
+}
+
+impl Cutoff for Morse {
+    fn cutoff(&self) -> f64 {
+        f64::INFINITY
     }
 }

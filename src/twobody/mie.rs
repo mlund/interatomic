@@ -81,4 +81,7 @@ impl<const N: u32, const M: u32> Cutoff for Mie<N, M> {
     fn cutoff_squared(&self) -> f64 {
         f64::INFINITY
     }
+    fn lower_cutoff(&self) -> f64 {
+        self.sigma * 0.6
+    }
 }

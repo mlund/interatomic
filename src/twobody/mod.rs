@@ -24,7 +24,6 @@ use core::ops::Add;
 use dyn_clone::DynClone;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 mod ashbaugh_hatch;
 mod fene;
@@ -79,7 +78,7 @@ pub trait AnisotropicTwobodyEnergy: Send + Sync {
 }
 
 /// Potential energy between a pair of isotropic particles, 𝑈(𝑟).
-pub trait IsotropicTwobodyEnergy: AnisotropicTwobodyEnergy + DynClone + Debug {
+pub trait IsotropicTwobodyEnergy: AnisotropicTwobodyEnergy + DynClone + Debug + Cutoff {
     /// Interaction energy between a pair of isotropic particles.
     fn isotropic_twobody_energy(&self, distance_squared: f64) -> f64;
 
@@ -119,6 +118,12 @@ impl Default for NoInteraction {
     #[inline(always)]
     fn default() -> Self {
         Self {}
+    }
+}
+
+impl Cutoff for NoInteraction {
+    fn cutoff(&self) -> f64 {
+        f64::INFINITY
     }
 }
 
@@ -169,13 +174,16 @@ impl<T: Cutoff, U: Cutoff> Cutoff for Combined<T, U> {
     }
 }
 
-impl IsotropicTwobodyEnergy for Box<dyn IsotropicTwobodyEnergy> {
-    fn isotropic_twobody_energy(&self, distance_squared: f64) -> f64 {
-        self.as_ref().isotropic_twobody_energy(distance_squared)
+impl Cutoff for Box<dyn IsotropicTwobodyEnergy> {
+    fn cutoff(&self) -> f64 {
+        self.as_ref().cutoff()
+    }
+    fn lower_cutoff(&self) -> f64 {
+        self.as_ref().lower_cutoff()
     }
 }
 
-impl IsotropicTwobodyEnergy for Arc<dyn IsotropicTwobodyEnergy> {
+impl IsotropicTwobodyEnergy for Box<dyn IsotropicTwobodyEnergy> {
     fn isotropic_twobody_energy(&self, distance_squared: f64) -> f64 {
         self.as_ref().isotropic_twobody_energy(distance_squared)
     }

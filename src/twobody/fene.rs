@@ -15,11 +15,12 @@
 //! Implementation of the FENE potential.
 
 use super::IsotropicTwobodyEnergy;
+use coulomb::Cutoff;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 /// Finitely extensible nonlinear elastic potential
-/// See <https://en.wikipedia.org/wiki/Finitely_extensible_nonlinear_elastic_potential>.
+/// See <https://en.wikipedia.org/wiki/FENE_model>.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(
     feature = "serde",
@@ -53,5 +54,11 @@ impl IsotropicTwobodyEnergy for FENE {
     #[inline]
     fn isotropic_twobody_energy(&self, _distance_squared: f64) -> f64 {
         todo!("FENE potential is not yet implemented");
+    }
+}
+
+impl Cutoff for FENE {
+    fn cutoff(&self) -> f64 {
+        f64::INFINITY
     }
 }

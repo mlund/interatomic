@@ -15,6 +15,7 @@
 //! Implementation of the harmonic potential.
 
 use super::IsotropicTwobodyEnergy;
+use crate::Cutoff;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
@@ -58,5 +59,11 @@ impl IsotropicTwobodyEnergy for Harmonic {
     #[inline(always)]
     fn isotropic_twobody_energy(&self, distance_squared: f64) -> f64 {
         0.5 * self.spring_constant * (distance_squared.sqrt() - self.eq_distance).powi(2)
+    }
+}
+
+impl Cutoff for Harmonic {
+    fn cutoff(&self) -> f64 {
+        f64::INFINITY
     }
 }

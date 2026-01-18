@@ -14,6 +14,7 @@
 
 //! Implementation of the Urey-Bradley potential.
 
+use crate::Cutoff;
 use super::IsotropicTwobodyEnergy;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -43,5 +44,11 @@ impl IsotropicTwobodyEnergy for UreyBradley {
     #[inline(always)]
     fn isotropic_twobody_energy(&self, _distance_squared: f64) -> f64 {
         todo!("Urey-Bradley potential is not yet implemented");
+    }
+}
+
+impl Cutoff for UreyBradley {
+    fn cutoff(&self) -> f64 {
+        f64::INFINITY
     }
 }

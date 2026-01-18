@@ -15,10 +15,12 @@
 //! Implementation of the enum for holding twobody potentials.
 
 pub enum TwobodyPotential {
+    AshbaughHatch(super::AshbaughHatch),
+    Combined,
     FENE(super::FENE),
     HardSphere(super::HardSphere),
     Harmonic(super::Harmonic),
+    KimHummer(super::KimHummer),
     LennardJones(super::LennardJones),
     WeeksChandlerAndersen(super::WeeksChandlerAndersen),
-    Combined,
 }
