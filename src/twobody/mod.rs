@@ -44,8 +44,9 @@ pub use fene::FENE;
 pub use hardsphere::HardSphere;
 pub use harmonic::Harmonic;
 pub use hermite::{
-    spline_potential, GridType, SimdArrayF32, SimdF32, SplineConfig, SplineStats, SplineTableSimd,
-    SplineTableSimdF32, SplinedPotential, ValidationResult, LANES_F32,
+    simd_f32_from_array, simd_f32_to_array, spline_potential, GridType, SimdArrayF32, SimdF32,
+    SplineConfig, SplineStats, SplineTableSimd, SplineTableSimdF32, SplinedPotential,
+    ValidationResult, LANES_F32,
 };
 pub use kimhummer::KimHummer;
 pub use lennard_jones::LennardJones;

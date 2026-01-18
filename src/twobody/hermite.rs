@@ -1550,9 +1550,16 @@ impl SplineTableSimdF32 {
     #[inline]
     pub fn energy_x4(&self, rsq: f32x4) -> f32x4 {
         let rsq_max = f32x4::splat(self.r_max * self.r_max);
+        let zero = f32x4::ZERO;
+
+        // Early exit if all distances are beyond cutoff
+        let cutoff_mask = rsq.cmp_lt(rsq_max);
+        if cutoff_mask.none() {
+            return zero;
+        }
+
         let r_min_v = f32x4::splat(self.r_min);
         let r_max_v = f32x4::splat(self.r_max);
-        let zero = f32x4::ZERO;
 
         // SIMD sqrt for r
         let r = rsq.sqrt();
@@ -1662,9 +1669,16 @@ impl SplineTableSimdF32 {
     #[inline]
     pub fn energy_simd(&self, rsq: SimdF32) -> SimdF32 {
         let rsq_max = SimdF32::splat(self.r_max * self.r_max);
+        let zero = SimdF32::ZERO;
+
+        // Early exit if all distances are beyond cutoff
+        let cutoff_mask = rsq.cmp_lt(rsq_max);
+        if cutoff_mask.none() {
+            return zero;
+        }
+
         let r_min_v = SimdF32::splat(self.r_min);
         let r_max_v = SimdF32::splat(self.r_max);
-        let zero = SimdF32::ZERO;
 
         let r = rsq.sqrt();
         let extrap_dist = (r_min_v - r).max(zero);
@@ -1750,6 +1764,56 @@ impl SplineTableSimdF32 {
 
         let mask = rsq.cmp_lt(rsq_max);
         result & mask.blend(SimdF32::splat(f32::from_bits(!0u32)), SimdF32::ZERO)
+    }
+
+    /// Fast SIMD energy evaluation optimized for PowerLaw2 grid.
+    ///
+    /// This method skips extrapolation below r_min and is optimized for the
+    /// common case where the grid type is PowerLaw2. Panics if grid_type is
+    /// not PowerLaw2.
+    #[inline]
+    pub fn energy_simd_powerlaw2(&self, rsq: SimdF32) -> SimdF32 {
+        debug_assert!(
+            matches!(self.grid_type, GridType::PowerLaw2),
+            "energy_simd_powerlaw2 requires PowerLaw2 grid"
+        );
+
+        let rsq_max = SimdF32::splat(self.r_max * self.r_max);
+        let zero = SimdF32::ZERO;
+
+        // Early exit if all distances are beyond cutoff
+        let cutoff_mask = rsq.cmp_lt(rsq_max);
+        if cutoff_mask.none() {
+            return zero;
+        }
+
+        let r_min_v = SimdF32::splat(self.r_min);
+        let r_max_v = SimdF32::splat(self.r_max);
+        let r_range_v = SimdF32::splat(self.r_max - self.r_min);
+        let n_minus_1 = SimdF32::splat((self.n - 1) as f32);
+
+        let r = rsq.sqrt();
+        let r_clamped = r.max(r_min_v).min(r_max_v);
+
+        // PowerLaw2 grid: t = sqrt((r - r_min) / r_range) * (n - 1)
+        let x = ((r_clamped - r_min_v) / r_range_v).sqrt();
+        let t = x * n_minus_1;
+
+        // Extract indices and evaluate Horner per-lane (better for non-uniform indices)
+        let t_arr = simd_f32_to_array(t);
+        let max_idx = self.n - 2;
+        let mut energies: SimdArrayF32 = [0.0; LANES_F32];
+
+        for lane in 0..LANES_F32 {
+            let i = (t_arr[lane] as usize).min(max_idx);
+            let eps = t_arr[lane] - i as f32;
+            let c = &self.coeffs[i];
+            // Horner's method: c0 + eps*(c1 + eps*(c2 + eps*c3))
+            energies[lane] = c[0] + eps * (c[1] + eps * (c[2] + eps * c[3]));
+        }
+
+        // Apply cutoff mask
+        cutoff_mask.blend(simd_f32_from_array(energies), zero)
     }
 
     /// Sum energies for a batch using architecture-optimal SIMD.
