@@ -286,7 +286,8 @@ impl SplinedPotential {
         let n_f64 = (n - 1) as f64;
 
         // Grid point generator: returns (r, rsq) for grid index i
-        let (delta, grid_point): (f64, Box<dyn Fn(usize) -> (f64, f64)>) = match config.grid_type {
+        type GridPointFn = Box<dyn Fn(usize) -> (f64, f64)>;
+        let (delta, grid_point): (f64, GridPointFn) = match config.grid_type {
             GridType::UniformRsq => {
                 let delta_rsq = (rsq_max - rsq_min) / n_f64;
                 (delta_rsq, Box::new(move |i| {
@@ -416,11 +417,8 @@ impl SplinedPotential {
             i_next: usize,
             delta_default: f64,
         ) -> f64 {
-            let n = values.len();
             if i > 0 {
                 (values[i_next] - values[i - 1]) / (coords[i_next] - coords[i - 1])
-            } else if i_next + 1 < n {
-                (values[i_next] - values[i]) / delta_default
             } else {
                 (values[i_next] - values[i]) / delta_default
             }
@@ -1695,9 +1693,7 @@ impl SplineTableSimdF32 {
         for i in 0..chunks {
             let base = i * LANES_F32;
             let mut rsq_arr: SimdArrayF32 = [0.0; LANES_F32];
-            for lane in 0..LANES_F32 {
-                rsq_arr[lane] = rsq_values[base + lane];
-            }
+            rsq_arr.copy_from_slice(&rsq_values[base..base + LANES_F32]);
             sum += self.energy_simd(simd_f32_from_array(rsq_arr));
         }
 
