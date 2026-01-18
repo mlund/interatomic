@@ -16,6 +16,7 @@
 //!
 //! Module for describing exactly two particles interacting with each other.
 
+use crate::Cutoff;
 pub use crate::Vector3;
 use core::fmt::Debug;
 use core::iter::Sum;
@@ -156,6 +157,15 @@ impl<T: IsotropicTwobodyEnergy + Clone, U: IsotropicTwobodyEnergy + Clone> Isotr
     fn isotropic_twobody_energy(&self, distance_squared: f64) -> f64 {
         self.0.isotropic_twobody_energy(distance_squared)
             + self.1.isotropic_twobody_energy(distance_squared)
+    }
+}
+
+impl<T: Cutoff, U: Cutoff> Cutoff for Combined<T, U> {
+    fn cutoff(&self) -> f64 {
+        self.0.cutoff().min(self.1.cutoff())
+    }
+    fn lower_cutoff(&self) -> f64 {
+        self.0.lower_cutoff().max(self.1.lower_cutoff())
     }
 }
 

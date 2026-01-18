@@ -17,7 +17,7 @@
 //! This module provides tools for calculating the two-body interaction energy between
 //! electric multipole moments, such as monopoles, dipoles, quadrupoles etc.
 
-use crate::{twobody::IsotropicTwobodyEnergy, Vector3};
+use crate::{twobody::IsotropicTwobodyEnergy, Cutoff, Vector3};
 use coulomb::{
     pairwise::MultipoleEnergy,
     permittivity::{ConstantPermittivity, RelativePermittivity},
@@ -91,6 +91,15 @@ impl<T: MultipoleEnergy + Debug + Clone + PartialEq + Send + Sync> IsotropicTwob
     }
 }
 
+impl<T: MultipoleEnergy + Cutoff> Cutoff for IonIon<T> {
+    fn cutoff(&self) -> f64 {
+        self.scheme.cutoff()
+    }
+    fn lower_cutoff(&self) -> f64 {
+        self.scheme.lower_cutoff()
+    }
+}
+
 /// Alias for ion-ion with Yukawa
 pub type IonIonYukawa<'a> = IonIon<coulomb::pairwise::Yukawa>;
 
@@ -139,6 +148,15 @@ impl<T: MultipoleEnergy + Debug + Clone + PartialEq + Send + Sync> IsotropicTwob
 
         let to_kjmol = coulomb::TO_CHEMISTRY_UNIT / f64::from(self.ionion.permittivity);
         to_kjmol * (ion_ion + ion_induced_dipole)
+    }
+}
+
+impl<T: MultipoleEnergy + Cutoff> Cutoff for IonIonPolar<T> {
+    fn cutoff(&self) -> f64 {
+        self.ionion.cutoff()
+    }
+    fn lower_cutoff(&self) -> f64 {
+        self.ionion.lower_cutoff()
     }
 }
 

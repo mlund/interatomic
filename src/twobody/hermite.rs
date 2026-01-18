@@ -195,8 +195,6 @@ pub struct SplinedPotential {
     force_shift: f64,
     /// Original cutoff distance
     cutoff: f64,
-    /// Energy at r_min (for linear extrapolation below r_min)
-    u_at_rmin: f64,
     /// Force at r_min (for linear extrapolation below r_min)
     f_at_rmin: f64,
 }
@@ -225,7 +223,8 @@ impl SplinedPotential {
 
     /// Create a new splined potential with an explicit cutoff distance.
     ///
-    /// Use this for potentials that don't implement `Cutoff` or have infinite cutoff.
+    /// Use this for potentials that have infinite cutoff, or when you want
+    /// to override the potential's native cutoff.
     ///
     /// # Arguments
     /// * `potential` - The analytical potential to tabulate
@@ -234,7 +233,7 @@ impl SplinedPotential {
     ///
     /// # Panics
     /// Panics if `n_points < 4`, if rsq_min >= rsq_max, or if cutoff is not finite/positive
-    pub fn with_cutoff<P: IsotropicTwobodyEnergy>(
+    pub fn with_cutoff<P: IsotropicTwobodyEnergy + Cutoff>(
         potential: &P,
         cutoff: f64,
         config: SplineConfig,
@@ -247,12 +246,18 @@ impl SplinedPotential {
     }
 
     /// Internal builder that does the actual work.
-    fn build<P: IsotropicTwobodyEnergy>(potential: &P, cutoff: f64, config: SplineConfig) -> Self {
+    fn build<P: IsotropicTwobodyEnergy + Cutoff>(
+        potential: &P,
+        cutoff: f64,
+        config: SplineConfig,
+    ) -> Self {
         let n = config.n_points;
         assert!(n >= 4, "Need at least 4 grid points");
 
         let rsq_max = config.rsq_max.unwrap_or(cutoff * cutoff);
-        let rsq_min = config.rsq_min.unwrap_or(0.01_f64.min(rsq_max * 0.001));
+        // Use lower_cutoff from potential if rsq_min not explicitly set
+        let lower = potential.lower_cutoff();
+        let rsq_min = config.rsq_min.unwrap_or_else(|| lower * lower).max(1e-10); // Avoid zero/negative values
 
         assert!(rsq_min < rsq_max, "rsq_min must be less than rsq_max");
 
@@ -422,12 +427,9 @@ impl SplinedPotential {
         let coeffs =
             Self::compute_cubic_hermite_coeffs(&rsq_vals, &u_vals, &f_vals, config.grid_type);
 
-        // Compute energy and force at r_min for linear extrapolation below r_min
-        // These are used when r < r_min to maintain repulsive behavior
-        let mut u_at_rmin = potential.isotropic_twobody_energy(rsq_min) - energy_shift;
+        // Compute force at r_min for linear extrapolation below r_min
         let mut f_at_rmin = potential.isotropic_twobody_force(rsq_min);
         if config.shift_force {
-            u_at_rmin -= (r_min - r_max) * force_shift;
             f_at_rmin -= force_shift;
         }
 
@@ -442,7 +444,6 @@ impl SplinedPotential {
             energy_shift,
             force_shift,
             cutoff,
-            u_at_rmin,
             f_at_rmin,
         }
     }
@@ -785,6 +786,11 @@ impl Cutoff for SplinedPotential {
     #[inline]
     fn cutoff_squared(&self) -> f64 {
         self.r_max * self.r_max
+    }
+
+    #[inline]
+    fn lower_cutoff(&self) -> f64 {
+        self.r_min
     }
 }
 
@@ -2032,9 +2038,7 @@ mod tests {
         );
         let simd = splined.to_simd();
 
-        let distances: Vec<f64> = (0..100)
-            .map(|i| 1.0 + 0.05 * i as f64)
-            .collect();
+        let distances: Vec<f64> = (0..100).map(|i| 1.0 + 0.05 * i as f64).collect();
 
         let scalar_sum: f64 = distances
             .iter()
@@ -2262,7 +2266,10 @@ mod tests {
         let splined_inv = SplinedPotential::with_cutoff(&lj, cutoff, config_inv);
         let splined_pl2 = SplinedPotential::with_cutoff(&lj, cutoff, config_pl2);
 
-        println!("\n=== InverseRsq vs PowerLaw2 Comparison (LJ, {} points) ===", n_points);
+        println!(
+            "\n=== InverseRsq vs PowerLaw2 Comparison (LJ, {} points) ===",
+            n_points
+        );
         println!(
             "\n{:>6} {:>12} {:>12} {:>12}",
             "r", "err_InvRsq", "err_PL2", "better"
@@ -2299,7 +2306,10 @@ mod tests {
             );
         }
 
-        println!("\nInverseRsq wins: {}, PowerLaw2 wins: {}", inv_wins, pl2_wins);
+        println!(
+            "\nInverseRsq wins: {}, PowerLaw2 wins: {}",
+            inv_wins, pl2_wins
+        );
         println!("Note: InverseRsq should excel at short range (r < 1.5σ)");
     }
 
@@ -2397,9 +2407,7 @@ mod tests {
         );
         let simd = splined.to_simd();
 
-        let distances: Vec<f64> = (0..100)
-            .map(|i| 1.0 + 0.05 * i as f64)
-            .collect();
+        let distances: Vec<f64> = (0..100).map(|i| 1.0 + 0.05 * i as f64).collect();
 
         let scalar_sum: f64 = distances
             .iter()
