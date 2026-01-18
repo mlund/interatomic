@@ -39,6 +39,8 @@
 
 use super::IsotropicTwobodyEnergy;
 use coulomb::Cutoff;
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
 use std::fmt::{self, Debug};
 
 // ============================================================================
@@ -71,6 +73,7 @@ impl Debug for SplineCoeffs {
 /// The choice of grid type significantly affects accuracy for potentials
 /// with steep repulsive cores (like Lennard-Jones).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 pub enum GridType {
     /// Uniform spacing in r² (legacy behavior).
     /// Gives sparser sampling at short range — poor for steep potentials.
@@ -95,6 +98,7 @@ pub enum GridType {
 
 /// Configuration for spline table construction
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 pub struct SplineConfig {
     /// Number of grid points (default: 2000)
     pub n_points: usize,
