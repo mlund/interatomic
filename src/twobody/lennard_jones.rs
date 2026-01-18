@@ -106,6 +106,9 @@ impl Cutoff for LennardJones {
     fn cutoff_squared(&self) -> f64 {
         f64::INFINITY
     }
+    fn lower_cutoff(&self) -> f64 {
+        self.sigma_squared.sqrt() * 0.6
+    }
 }
 
 impl IsotropicTwobodyEnergy for LennardJones {

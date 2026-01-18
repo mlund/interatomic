@@ -67,13 +67,14 @@ impl AshbaughHatch {
 }
 
 impl Cutoff for AshbaughHatch {
-    #[inline(always)]
     fn cutoff_squared(&self) -> f64 {
         self.cutoff * self.cutoff
     }
-    #[inline(always)]
     fn cutoff(&self) -> f64 {
         self.cutoff
+    }
+    fn lower_cutoff(&self) -> f64 {
+        self.lennard_jones.lower_cutoff()
     }
 }
 

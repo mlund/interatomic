@@ -68,6 +68,9 @@ impl Cutoff for WeeksChandlerAndersen {
     fn cutoff(&self) -> f64 {
         self.cutoff_squared().sqrt()
     }
+    fn lower_cutoff(&self) -> f64 {
+        self.lennard_jones.lower_cutoff()
+    }
 }
 
 /// Conversion from Lennard-Jones

@@ -22,6 +22,7 @@
 
 use crate::twobody::IsotropicTwobodyEnergy;
 
+use coulomb::Cutoff;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
@@ -109,6 +110,18 @@ impl IsotropicTwobodyEnergy for KimHummer {
             // Neutral (ε = 0): soft wall
             0.01 * sr12
         }
+    }
+}
+
+impl Cutoff for KimHummer {
+    fn cutoff(&self) -> f64 {
+        f64::INFINITY
+    }
+    fn cutoff_squared(&self) -> f64 {
+        f64::INFINITY
+    }
+    fn lower_cutoff(&self) -> f64 {
+        self.sigma * 0.6
     }
 }
 
