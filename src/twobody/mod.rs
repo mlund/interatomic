@@ -247,7 +247,7 @@ pub type WCA = WeeksChandlerAndersen;
 
 // test Combined
 #[test]
-pub fn test_combined() {
+fn test_combined() {
     use approx::assert_relative_eq;
     let r2 = 0.5;
 
