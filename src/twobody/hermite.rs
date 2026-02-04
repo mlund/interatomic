@@ -1060,7 +1060,10 @@ impl SplineTableSimd {
         let (i, eps) = self.compute_index_eps(r);
 
         // Horner's method + linear extrapolation
-        let u_spline = eps.mul_add(eps.mul_add(eps.mul_add(self.u3[i], self.u2[i]), self.u1[i]), self.u0[i]);
+        let u_spline = eps.mul_add(
+            eps.mul_add(eps.mul_add(self.u3[i], self.u2[i]), self.u1[i]),
+            self.u0[i],
+        );
         self.f_at_rmin.mul_add(extrap_dist, u_spline)
     }
 

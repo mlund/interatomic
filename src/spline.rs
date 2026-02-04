@@ -31,7 +31,9 @@ fn first_derivative(func: impl Fn(f64) -> f64, x: f64, dx: f64) -> f64 {
 
 // Second derivative with respect to x
 fn second_derivative(func: impl Fn(f64) -> f64, x: f64, dx: f64) -> f64 {
-    (first_derivative(&func, dx.mul_add(0.5, x), dx) - first_derivative(&func, dx.mul_add(-0.5, x), dx)) / dx
+    (first_derivative(&func, dx.mul_add(0.5, x), dx)
+        - first_derivative(&func, dx.mul_add(-0.5, x), dx))
+        / dx
 }
 
 /// Returns the 0th, 1st, and 2nd derivative at x
@@ -153,9 +155,11 @@ impl Andrea {
         let dx = upper_x - lower_x;
         let dx_squared = dx * dx;
         let dx_cubed = dx_squared * dx;
-        let a = 6.0
-            * (0.5 * lower_diff.2).mul_add(-dx_squared, lower_diff.1.mul_add(-dx, upper_diff.0 - lower_diff.0))
-            / dx_cubed;
+        let a =
+            6.0 * (0.5 * lower_diff.2).mul_add(
+                -dx_squared,
+                lower_diff.1.mul_add(-dx, upper_diff.0 - lower_diff.0),
+            ) / dx_cubed;
         let b = 2.0 * lower_diff.2.mul_add(-dx, upper_diff.1 - lower_diff.1) / dx_squared;
         let c = (upper_diff.2 - lower_diff.2) / dx;
         let c3 = 3.0f64.mul_add(c, 10.0f64.mul_add(a, -(12.0 * b))) / 6.0;
@@ -197,7 +201,13 @@ impl Andrea {
                     + dz * (ubuft[3] + dz * (ubuft[4] + dz * (ubuft[5] + dz * ubuft[6]))));
 
             let derivative_sum = ubuft[2]
-                + dz * 2.0f64.mul_add(ubuft[3], dz * 3.0f64.mul_add(ubuft[4], dz * 4.0f64.mul_add(ubuft[5], dz * (5.0 * ubuft[6]))));
+                + dz * 2.0f64.mul_add(
+                    ubuft[3],
+                    dz * 3.0f64.mul_add(
+                        ubuft[4],
+                        dz * 4.0f64.mul_add(ubuft[5], dz * (5.0 * ubuft[6])),
+                    ),
+                );
 
             if (sum - u0).abs() > self.spline.tolerance {
                 return error_codes;
@@ -316,7 +326,19 @@ impl Andrea {
         let ndx6 = ndx * 6;
         assert!(ndx6 + 5 < data.coeff.len());
         let dz = r2 - data.r2[ndx];
-        dz.mul_add(dz.mul_add(dz.mul_add(dz.mul_add(dz.mul_add(data.coeff[ndx6 + 5], data.coeff[ndx6 + 4]), data.coeff[ndx6 + 3]), data.coeff[ndx6 + 2]), data.coeff[ndx6 + 1]), data.coeff[ndx6])
+        dz.mul_add(
+            dz.mul_add(
+                dz.mul_add(
+                    dz.mul_add(
+                        dz.mul_add(data.coeff[ndx6 + 5], data.coeff[ndx6 + 4]),
+                        data.coeff[ndx6 + 3],
+                    ),
+                    data.coeff[ndx6 + 2],
+                ),
+                data.coeff[ndx6 + 1],
+            ),
+            data.coeff[ndx6],
+        )
     }
 
     /// Evaluate the derivative of the splined function at a given squared distance.
@@ -332,7 +354,16 @@ impl Andrea {
         let ndx6 = ndx * 6;
         assert!(ndx6 + 5 < knots.coeff.len());
         let dz = r2 - knots.r2[ndx];
-        dz.mul_add(2.0f64.mul_add(knots.coeff[ndx6 + 2], dz * 3.0f64.mul_add(knots.coeff[ndx6 + 3], dz * 4.0f64.mul_add(knots.coeff[ndx6 + 4], dz * (5.0 * knots.coeff[ndx6 + 5])))), knots.coeff[ndx6 + 1])
+        dz.mul_add(
+            2.0f64.mul_add(
+                knots.coeff[ndx6 + 2],
+                dz * 3.0f64.mul_add(
+                    knots.coeff[ndx6 + 3],
+                    dz * 4.0f64.mul_add(knots.coeff[ndx6 + 4], dz * (5.0 * knots.coeff[ndx6 + 5])),
+                ),
+            ),
+            knots.coeff[ndx6 + 1],
+        )
     }
 }
 
