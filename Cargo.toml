@@ -1,6 +1,6 @@
 [package]
 name = "interatomic"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 description = "Library for calculating inter-particle interactions"
 readme = "README.md"
