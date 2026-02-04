@@ -20,8 +20,6 @@ pub enum TwobodyPotential {
     AshbaughHatch(super::AshbaughHatch),
     /// Combined potential (sum of two potentials)
     Combined,
-    /// Finitely extensible nonlinear elastic potential
-    FENE(super::FENE),
     /// Hard sphere potential
     HardSphere(super::HardSphere),
     /// Harmonic potential

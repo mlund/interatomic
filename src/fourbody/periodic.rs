@@ -12,7 +12,9 @@
 // See the license for the specific language governing permissions and
 // limitations under the license.
 
-//! Implementation of the periodic dihedral.
+//! Implementation of the periodic dihedral (work in progress).
+
+#![allow(dead_code)]
 
 use super::FourbodyAngleEnergy;
 #[cfg(feature = "serde")]

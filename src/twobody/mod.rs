@@ -40,7 +40,6 @@ pub mod potential;
 mod ureybradley;
 mod wca;
 pub use ashbaugh_hatch::AshbaughHatch;
-pub use fene::FENE;
 pub use hardsphere::HardSphere;
 pub use harmonic::Harmonic;
 pub use hermite::{
@@ -51,9 +50,7 @@ pub use hermite::{
 pub use kimhummer::KimHummer;
 pub use lennard_jones::LennardJones;
 pub use mie::Mie;
-pub use morse::Morse;
 pub use multipole::{IonIon, IonIonPlain, IonIonPolar, IonIonYukawa};
-pub use ureybradley::UreyBradley;
 pub use wca::WeeksChandlerAndersen;
 
 /// Relative orientation between a pair of anisotropic particles.

@@ -12,7 +12,9 @@
 // See the license for the specific language governing permissions and
 // limitations under the license.
 
-//! Implementation of the three-body cosine based potential as used in GROMOS-96.
+//! Implementation of the three-body cosine based potential as used in GROMOS-96 (work in progress).
+
+#![allow(dead_code)]
 
 use super::ThreebodyAngleEnergy;
 #[cfg(feature = "serde")]

@@ -12,7 +12,9 @@
 // See the license for the specific language governing permissions and
 // limitations under the license.
 
-//! Implementation of the Urey-Bradley potential.
+//! Implementation of the Urey-Bradley potential (work in progress).
+
+#![allow(dead_code)]
 
 use super::IsotropicTwobodyEnergy;
 use crate::Cutoff;
