@@ -113,16 +113,8 @@ impl<T: IsotropicTwobodyEnergy> AnisotropicTwobodyEnergy for T {
 }
 
 /// Structure representing an interaction with always zero energy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NoInteraction {}
-
-impl Default for NoInteraction {
-    /// Create a new null interaction.
-    #[inline(always)]
-    fn default() -> Self {
-        Self {}
-    }
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NoInteraction;
 
 impl Cutoff for NoInteraction {
     fn cutoff(&self) -> f64 {

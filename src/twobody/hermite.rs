@@ -53,7 +53,7 @@ use std::fmt::{self, Debug};
 /// ```text
 /// V(ε) = c[0] + c[1]·ε + c[2]·ε² + c[3]·ε³
 /// ```
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq)]
 #[repr(C, align(32))] // 32-byte aligned for AVX loads
 pub struct SplineCoeffs {
     /// Energy polynomial coefficients [A₀, A₁, A₂, A₃]

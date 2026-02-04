@@ -60,10 +60,10 @@ use serde::{Deserialize, Serialize};
 pub struct KimHummer {
     /// Interaction strength (kT)
     #[cfg_attr(feature = "serde", serde(alias = "eps", alias = "ε"))]
-    pub epsilon: f64,
+    epsilon: f64,
     /// Contact distance (Å or other length unit)
     #[cfg_attr(feature = "serde", serde(alias = "σ"))]
-    pub sigma: f64,
+    sigma: f64,
 }
 
 impl KimHummer {
@@ -83,6 +83,18 @@ impl KimHummer {
     #[inline(always)]
     pub fn r0(&self) -> f64 {
         f64::powf(2.0, 1.0 / 6.0) * self.sigma
+    }
+
+    /// Get epsilon parameter (interaction strength)
+    #[inline(always)]
+    pub const fn get_epsilon(&self) -> f64 {
+        self.epsilon
+    }
+
+    /// Get sigma parameter (contact distance)
+    #[inline(always)]
+    pub const fn get_sigma(&self) -> f64 {
+        self.sigma
     }
 }
 
