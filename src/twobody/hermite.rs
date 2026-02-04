@@ -81,7 +81,7 @@ pub enum GridType {
     /// Uniform spacing in r.
     /// Gives equal sampling density everywhere.
     UniformR,
-    /// Power-law mapping: r(x) = r_min + (r_max - r_min) * x^p where x ∈ [0,1] is uniform.
+    /// Power-law mapping: r(x) = r_min + (r_max - r_min) * x^p where x ∈ `[0,1]` is uniform.
     /// For p > 1, gives denser sampling at short range (recommended for steep potentials).
     PowerLaw(f64),
     /// Optimized power-law mapping with p=2 (default).
