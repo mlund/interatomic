@@ -113,7 +113,7 @@ impl IsotropicTwobodyEnergy for KimHummer {
             let r0_squared = Self::TWO_TO_TWO_SIXTH * sigma_squared;
             if distance_squared < r0_squared {
                 // Inner branch: standard LJ shifted up by 2ε
-                4.0 * self.epsilon * (sr12 - sr6) + 2.0 * self.epsilon
+                (4.0 * self.epsilon).mul_add(sr12 - sr6, 2.0 * self.epsilon)
             } else {
                 // Outer branch: inverted LJ (always positive, decaying to zero)
                 -4.0 * self.epsilon * (sr12 - sr6)

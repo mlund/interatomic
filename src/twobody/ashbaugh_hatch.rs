@@ -97,7 +97,7 @@ impl IsotropicTwobodyEnergy for AshbaughHatch {
         if distance_squared
             <= self.lennard_jones.sigma_squared * WeeksChandlerAndersen::TWOTOTWOSIXTH
         {
-            lj - self.lambda * lj_rc + self.lennard_jones.get_epsilon() * (1.0 - self.lambda)
+            self.lennard_jones.get_epsilon().mul_add(1.0 - self.lambda, self.lambda.mul_add(-lj_rc, lj))
         } else {
             self.lambda * (lj - lj_rc)
         }

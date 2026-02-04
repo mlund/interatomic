@@ -117,7 +117,7 @@ impl IsotropicTwobodyEnergy for LennardJones {
     fn isotropic_twobody_energy(&self, squared_distance: f64) -> f64 {
         let x = self.sigma_squared / squared_distance; // σ²/r²
         let x = x * x * x; // σ⁶/r⁶
-        self.four_times_epsilon * (x * x - x)
+        self.four_times_epsilon * x.mul_add(x, -x)
     }
 }
 

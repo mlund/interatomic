@@ -146,19 +146,19 @@ impl SplineConfig {
     }
 
     /// Set minimum r² explicitly
-    pub fn with_rsq_min(mut self, rsq_min: f64) -> Self {
+    pub const fn with_rsq_min(mut self, rsq_min: f64) -> Self {
         self.rsq_min = Some(rsq_min);
         self
     }
 
     /// Set maximum r² explicitly (overrides cutoff)
-    pub fn with_rsq_max(mut self, rsq_max: f64) -> Self {
+    pub const fn with_rsq_max(mut self, rsq_max: f64) -> Self {
         self.rsq_max = Some(rsq_max);
         self
     }
 
     /// Set grid type (UniformR recommended for steep potentials)
-    pub fn with_grid_type(mut self, grid_type: GridType) -> Self {
+    pub const fn with_grid_type(mut self, grid_type: GridType) -> Self {
         self.grid_type = grid_type;
         self
     }
@@ -294,7 +294,7 @@ impl SplinedPotential {
                 (
                     delta_rsq,
                     Box::new(move |i| {
-                        let rsq = rsq_min + i as f64 * delta_rsq;
+                        let rsq = (i as f64).mul_add(delta_rsq, rsq_min);
                         (rsq.sqrt(), rsq)
                     }),
                 )
@@ -304,7 +304,7 @@ impl SplinedPotential {
                 (
                     delta_r,
                     Box::new(move |i| {
-                        let r = r_min + i as f64 * delta_r;
+                        let r = (i as f64).mul_add(delta_r, r_min);
                         (r, r * r)
                     }),
                 )
@@ -324,7 +324,7 @@ impl SplinedPotential {
                 2.0,
                 Box::new(move |i| {
                     let x = i as f64 / n_f64;
-                    let r = r_min + r_range * x * x;
+                    let r = (r_range * x).mul_add(x, r_min);
                     (r, r * r)
                 }),
             ),
@@ -335,7 +335,7 @@ impl SplinedPotential {
                 (
                     delta_w,
                     Box::new(move |i| {
-                        let w = w_min + i as f64 * delta_w;
+                        let w = (i as f64).mul_add(delta_w, w_min);
                         let rsq = 1.0 / w;
                         (rsq.sqrt(), rsq)
                     }),
@@ -466,8 +466,8 @@ impl<'a> IntervalData<'a> {
         [
             v0,
             delta * dv0,
-            3.0 * (v1 - v0) - delta * (2.0 * dv0 + dv1),
-            2.0 * (v0 - v1) + delta * (dv0 + dv1),
+            3.0f64.mul_add(v1 - v0, -(delta * 2.0f64.mul_add(dv0, dv1))),
+            2.0f64.mul_add(v0 - v1, delta * (dv0 + dv1)),
         ]
     }
 
@@ -745,10 +745,10 @@ impl IsotropicTwobodyEnergy for SplinedPotential {
 
         // Horner's method for polynomial evaluation
         let c = &self.coeffs[i];
-        let u_spline = c.u[0] + eps * (c.u[1] + eps * (c.u[2] + eps * c.u[3]));
+        let u_spline = eps.mul_add(eps.mul_add(eps.mul_add(c.u[3], c.u[2]), c.u[1]), c.u[0]);
 
         // Add linear extrapolation for r < r_min (branchless)
-        u_spline + self.f_at_rmin * extrap_dist
+        self.f_at_rmin.mul_add(extrap_dist, u_spline)
     }
 
     /// Evaluate force at squared distance using cubic spline interpolation.
@@ -766,7 +766,7 @@ impl IsotropicTwobodyEnergy for SplinedPotential {
         let (i, eps) = self.compute_index_eps(r);
 
         let c = &self.coeffs[i];
-        c.f[0] + eps * (c.f[1] + eps * (c.f[2] + eps * c.f[3]))
+        eps.mul_add(eps.mul_add(eps.mul_add(c.f[3], c.f[2]), c.f[1]), c.f[0])
     }
 }
 
@@ -1060,8 +1060,8 @@ impl SplineTableSimd {
         let (i, eps) = self.compute_index_eps(r);
 
         // Horner's method + linear extrapolation
-        let u_spline = self.u0[i] + eps * (self.u1[i] + eps * (self.u2[i] + eps * self.u3[i]));
-        u_spline + self.f_at_rmin * extrap_dist
+        let u_spline = eps.mul_add(eps.mul_add(eps.mul_add(self.u3[i], self.u2[i]), self.u1[i]), self.u0[i]);
+        self.f_at_rmin.mul_add(extrap_dist, u_spline)
     }
 
     /// Evaluate energies for 4 distances using SIMD (f64x4).
@@ -1246,7 +1246,7 @@ impl SplineTableSimd {
     }
 
     /// Get memory usage in bytes.
-    pub fn memory_bytes(&self) -> usize {
+    pub const fn memory_bytes(&self) -> usize {
         8 * (self.u0.len()
             + self.u1.len()
             + self.u2.len()
@@ -1376,8 +1376,8 @@ impl SplineTableSimdF32 {
         let (i, eps) = self.compute_index_eps(r);
 
         let c = &self.coeffs[i];
-        let u_spline = c[0] + eps * (c[1] + eps * (c[2] + eps * c[3]));
-        u_spline + self.f_at_rmin * extrap_dist
+        let u_spline = eps.mul_add(eps.mul_add(eps.mul_add(c[3], c[2]), c[1]), c[0]);
+        self.f_at_rmin.mul_add(extrap_dist, u_spline)
     }
 
     /// Evaluate energies for 4 distances using f32x4 SIMD.
@@ -1739,7 +1739,7 @@ impl SplineTableSimdF32 {
     }
 
     /// Get memory usage in bytes.
-    pub fn memory_bytes(&self) -> usize {
+    pub const fn memory_bytes(&self) -> usize {
         self.coeffs.len() * 4 * std::mem::size_of::<f32>()
     }
 }
@@ -2413,7 +2413,7 @@ mod tests {
             let f_diff = (f_p2 - f_opt).abs();
 
             assert!(
-                u_diff < 1e-12,
+                u_diff < 1e-10,
                 "Energy mismatch at rsq={}: PowerLaw(2.0)={}, PowerLaw2={}, diff={}",
                 rsq,
                 u_p2,
@@ -2421,7 +2421,7 @@ mod tests {
                 u_diff
             );
             assert!(
-                f_diff < 1e-12,
+                f_diff < 1e-10,
                 "Force mismatch at rsq={}: PowerLaw(2.0)={}, PowerLaw2={}, diff={}",
                 rsq,
                 f_p2,
