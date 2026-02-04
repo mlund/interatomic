@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 
 /// Finitely extensible nonlinear elastic potential
 /// See <https://en.wikipedia.org/wiki/FENE_model>.
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(
     feature = "serde",
