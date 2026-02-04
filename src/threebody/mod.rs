@@ -18,9 +18,10 @@
 
 use dyn_clone::DynClone;
 
-mod cosine;
+pub mod cosine;
 pub mod harmonic;
 
+pub use cosine::CosineTorsion;
 pub use harmonic::HarmonicTorsion;
 
 /// Potential energy between three particles as a function of angle between them.

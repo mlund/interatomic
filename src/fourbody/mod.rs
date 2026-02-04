@@ -19,9 +19,10 @@
 use dyn_clone::DynClone;
 
 pub mod harmonic;
-mod periodic;
+pub mod periodic;
 
 pub use harmonic::HarmonicDihedral;
+pub use periodic::PeriodicDihedral;
 
 /// Potential energy between four particles as a function of dihedral angle between them.
 pub trait FourbodyAngleEnergy: DynClone {
