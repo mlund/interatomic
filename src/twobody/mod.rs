@@ -237,10 +237,13 @@ impl Sum for Box<dyn IsotropicTwobodyEnergy> {
 }
 
 /// Plain Coulomb potential combined with Lennard-Jones
-pub type CoulombLennardJones<'a> = Combined<IonIon<coulomb::pairwise::Plain>, LennardJones>;
+pub type CoulombLennardJones = Combined<IonIon<coulomb::pairwise::Plain>, LennardJones>;
 
 /// Yukawa potential combined with Lennard-Jones
-pub type YukawaLennardJones<'a> = Combined<IonIon<coulomb::pairwise::Yukawa>, LennardJones>;
+pub type YukawaLennardJones = Combined<IonIon<coulomb::pairwise::Yukawa>, LennardJones>;
+
+/// Alias for Weeks-Chandler-Andersen potential
+pub type WCA = WeeksChandlerAndersen;
 
 // test Combined
 #[test]
