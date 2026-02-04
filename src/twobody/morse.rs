@@ -14,8 +14,8 @@
 
 //! Implementation of the Morse potential.
 
-use crate::Cutoff;
 use super::IsotropicTwobodyEnergy;
+use crate::Cutoff;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +38,7 @@ pub struct Morse {
 }
 
 impl Morse {
+    /// Create a new Morse potential with equilibrium distance, well depth, and force constant.
     pub const fn new(equilibrium_distance: f64, well_depth: f64, force_constant: f64) -> Self {
         Self {
             equilibrium_distance,

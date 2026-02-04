@@ -33,6 +33,7 @@ pub struct HarmonicTorsion {
 }
 
 impl HarmonicTorsion {
+    /// Create a new harmonic torsion potential with equilibrium angle and spring constant.
     pub const fn new(eq_angle: f64, spring_constant: f64) -> Self {
         Self {
             eq_angle,

@@ -61,6 +61,7 @@ impl HardSphere {
         }
     }
 
+    /// Create a hard sphere potential using a combination rule to mix two sigma values.
     pub fn from_combination_rule(rule: CombinationRule, sigmas: (f64, f64)) -> Self {
         let sigma = rule.mix_sigmas(sigmas);
         Self::new(sigma)

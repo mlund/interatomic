@@ -12,6 +12,8 @@
 // See the license for the specific language governing permissions and
 // limitations under the license.
 
+#![warn(missing_docs)]
+
 //! # Interatomic
 //!
 //! A library for calculating interatomic interactions

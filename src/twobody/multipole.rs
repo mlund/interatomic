@@ -110,6 +110,7 @@ pub type IonIonPlain<'a> = IonIon<coulomb::pairwise::Plain>;
 #[derive(Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize))]
 pub struct IonIonPolar<T: MultipoleEnergy> {
+    /// The underlying ion-ion interaction
     pub ionion: IonIon<T>,
     /// Charges of two particles
     charges: (f64, f64),

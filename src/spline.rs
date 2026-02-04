@@ -43,25 +43,30 @@ fn derivatives(func: impl Fn(f64) -> f64, x: f64, dx: f64) -> (f64, f64, f64) {
     )
 }
 
+/// Spline knot points and coefficients for polynomial interpolation.
 #[derive(Default, PartialEq, Clone)]
 pub struct Knots {
     r2: Vec<f64>,    // r2 for intervals
     coeff: Vec<f64>, // c for coefficients
-    pub rmin2: f64,  // useful to save these with table
+    /// Minimum squared distance
+    pub rmin2: f64,
+    /// Maximum squared distance
     pub rmax2: f64,
 }
 
 impl Knots {
+    /// Returns true if there are no knot points.
     pub const fn is_empty(&self) -> bool {
         self.r2.is_empty() && self.coeff.is_empty()
     }
 
+    /// Returns the number of knot points.
     pub const fn len(&self) -> usize {
         self.r2.len()
     }
 }
 
-/* base class for all tabulators - no dependencies */
+/// Base spline tabulator with tolerance settings.
 #[derive(PartialEq, Clone)]
 pub struct Spline {
     /// Tolerance on the spline values
@@ -86,6 +91,7 @@ impl Default for Spline {
 }
 
 impl Spline {
+    /// Validates that the tolerance settings are valid.
     pub fn check_tolerance(&self) -> Result<(), anyhow::Error> {
         if self.derivative_tolerance != -1.0 && self.derivative_tolerance <= 0.0 {
             bail!("ftol too small");
@@ -99,6 +105,7 @@ impl Spline {
         self.derivative_tolerance = ftol;
     }
 
+    /// Set the step size used for numerical differentiation.
     pub const fn set_differentiation_step_size(&mut self, step_size: f64) {
         self.diff_step_size = step_size;
     }
@@ -131,6 +138,7 @@ impl Default for Andrea {
 }
 
 impl Andrea {
+    /// Calculate spline coefficients for an interval given function values and derivatives at endpoints.
     pub fn get_coefficients(
         lower_x: f64,
         upper_x: f64,
@@ -165,6 +173,7 @@ impl Andrea {
         ]
     }
 
+    /// Verify that spline coefficients reproduce the function within tolerance.
     pub fn check_coefficients(
         &self,
         ubuft: &[f64],
@@ -206,6 +215,7 @@ impl Andrea {
         error_codes
     }
 
+    /// Generate spline knots for a function over a squared distance range.
     pub fn generate<F>(&mut self, func: &F, xmin_squared: f64, xmax_squared: f64) -> Result<Knots>
     where
         F: Fn(f64) -> f64,
@@ -297,6 +307,7 @@ impl Andrea {
         }
     }
 
+    /// Evaluate the splined function at a given squared distance.
     pub fn eval(&self, data: &Knots, r2: f64) -> f64 {
         // @todo: replace with linear search? usually there are only few knots
         let ndx = match data.r2.binary_search_by(|elem| elem.total_cmp(&r2)) {
@@ -313,6 +324,7 @@ impl Andrea {
                         + dz * (data.coeff[ndx6 + 4] + dz * data.coeff[ndx6 + 5]))))
     }
 
+    /// Evaluate the derivative of the splined function at a given squared distance.
     pub fn eval_derivative(&self, knots: &Knots, r2: f64) -> f64 {
         let ndx = match knots
             .r2

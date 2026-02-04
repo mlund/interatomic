@@ -55,6 +55,7 @@ impl<const N: u32, const M: u32> Mie<N, M> {
     const N_OVER_M: i32 = (N / M) as i32;
     const M_HALF: i32 = (M / 2) as i32;
 
+    /// Create a new Mie potential with epsilon (well depth) and sigma (diameter).
     pub const fn new(epsilon: f64, sigma: f64) -> Self {
         assert!(M > 0);
         assert!(N > M);

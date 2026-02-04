@@ -72,6 +72,7 @@ pub struct LennardJones {
 }
 
 impl LennardJones {
+    /// Create a new Lennard-Jones potential with epsilon (well depth) and sigma (diameter).
     pub const fn new(epsilon: f64, sigma: f64) -> Self {
         Self {
             four_times_epsilon: 4.0 * epsilon,

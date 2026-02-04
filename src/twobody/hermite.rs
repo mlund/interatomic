@@ -204,6 +204,7 @@ pub struct SplinedPotential {
 }
 
 impl SplinedPotential {
+    /// Returns a reference to the spline coefficients for all grid intervals.
     pub fn coefficients(&self) -> &[SplineCoeffs] {
         &self.coeffs
     }
@@ -290,42 +291,55 @@ impl SplinedPotential {
         let (delta, grid_point): (f64, GridPointFn) = match config.grid_type {
             GridType::UniformRsq => {
                 let delta_rsq = (rsq_max - rsq_min) / n_f64;
-                (delta_rsq, Box::new(move |i| {
-                    let rsq = rsq_min + i as f64 * delta_rsq;
-                    (rsq.sqrt(), rsq)
-                }))
+                (
+                    delta_rsq,
+                    Box::new(move |i| {
+                        let rsq = rsq_min + i as f64 * delta_rsq;
+                        (rsq.sqrt(), rsq)
+                    }),
+                )
             }
             GridType::UniformR => {
                 let delta_r = r_range / n_f64;
-                (delta_r, Box::new(move |i| {
-                    let r = r_min + i as f64 * delta_r;
-                    (r, r * r)
-                }))
+                (
+                    delta_r,
+                    Box::new(move |i| {
+                        let r = r_min + i as f64 * delta_r;
+                        (r, r * r)
+                    }),
+                )
             }
             GridType::PowerLaw(p) => {
                 assert!(p > 0.0, "Power-law exponent must be positive");
-                (p, Box::new(move |i| {
-                    let x = i as f64 / n_f64;
-                    let r = r_min + r_range * x.powf(p);
-                    (r, r * r)
-                }))
+                (
+                    p,
+                    Box::new(move |i| {
+                        let x = i as f64 / n_f64;
+                        let r = r_min + r_range * x.powf(p);
+                        (r, r * r)
+                    }),
+                )
             }
-            GridType::PowerLaw2 => {
-                (2.0, Box::new(move |i| {
+            GridType::PowerLaw2 => (
+                2.0,
+                Box::new(move |i| {
                     let x = i as f64 / n_f64;
                     let r = r_min + r_range * x * x;
                     (r, r * r)
-                }))
-            }
+                }),
+            ),
             GridType::InverseRsq => {
                 let w_min = 1.0 / rsq_max;
                 let w_max = 1.0 / rsq_min;
                 let delta_w = (w_max - w_min) / n_f64;
-                (delta_w, Box::new(move |i| {
-                    let w = w_min + i as f64 * delta_w;
-                    let rsq = 1.0 / w;
-                    (rsq.sqrt(), rsq)
-                }))
+                (
+                    delta_w,
+                    Box::new(move |i| {
+                        let w = w_min + i as f64 * delta_w;
+                        let rsq = 1.0 / w;
+                        (rsq.sqrt(), rsq)
+                    }),
+                )
             }
         };
 
@@ -397,7 +411,10 @@ impl SplinedPotential {
                 GridType::PowerLaw2 => interval.coeffs_power_law(2.0),
                 GridType::InverseRsq => interval.coeffs_inverse_rsq(),
             };
-            coeffs.push(SplineCoeffs { u: u_coeffs, f: f_coeffs });
+            coeffs.push(SplineCoeffs {
+                u: u_coeffs,
+                f: f_coeffs,
+            });
         }
 
         // Duplicate last interval for safety at boundary
@@ -478,8 +495,16 @@ impl<'a> IntervalData<'a> {
         let delta = self.rsq[self.i + 1] - self.rsq[self.i];
 
         // dU/d(rsq) = -F(r) / (2r)  via chain rule
-        let du_i = if self.r_i > 1e-10 { -self.f_i / (2.0 * self.r_i) } else { 0.0 };
-        let du_i1 = if self.r_i1 > 1e-10 { -self.f_i1 / (2.0 * self.r_i1) } else { 0.0 };
+        let du_i = if self.r_i > 1e-10 {
+            -self.f_i / (2.0 * self.r_i)
+        } else {
+            0.0
+        };
+        let du_i1 = if self.r_i1 > 1e-10 {
+            -self.f_i1 / (2.0 * self.r_i1)
+        } else {
+            0.0
+        };
 
         let df_i = self.df_prev(self.rsq[self.i + 1], delta, |j| self.rsq[j]);
         let df_i1 = self.df_next(self.rsq[self.i], self.rsq[self.i + 1], |j| self.rsq[j]);
@@ -558,7 +583,6 @@ impl<'a> IntervalData<'a> {
 }
 
 impl SplinedPotential {
-
     /// Get the squared cutoff distance.
     #[inline]
     pub fn cutoff_squared(&self) -> f64 {
@@ -764,24 +788,36 @@ impl Debug for SplinedPotential {
 /// Statistics about a spline table.
 #[derive(Debug, Clone)]
 pub struct SplineStats {
+    /// Number of grid points
     pub n_points: usize,
+    /// Minimum squared distance
     pub rsq_min: f64,
+    /// Maximum squared distance
     pub rsq_max: f64,
+    /// Minimum distance
     pub r_min: f64,
+    /// Maximum distance
     pub r_max: f64,
     /// Grid spacing: Δr for UniformR, Δ(r²) for UniformRsq
     pub delta: f64,
+    /// Grid spacing strategy used
     pub grid_type: GridType,
+    /// Memory usage in bytes
     pub memory_bytes: usize,
+    /// Energy shift applied at cutoff
     pub energy_shift: f64,
 }
 
 /// Results from validating a spline against the original potential.
 #[derive(Debug, Clone)]
 pub struct ValidationResult {
+    /// Maximum absolute energy error
     pub max_energy_error: f64,
+    /// Maximum absolute force error
     pub max_force_error: f64,
+    /// Squared distance where worst energy error occurred
     pub worst_rsq_energy: f64,
+    /// Squared distance where worst force error occurred
     pub worst_rsq_force: f64,
 }
 
@@ -859,14 +895,18 @@ use wide::f32x8;
 #[cfg(target_arch = "aarch64")]
 mod simd_config_f32 {
     pub use wide::f32x4 as SimdF32;
+    /// Number of f32 lanes in the SIMD vector (4 for NEON).
     pub const LANES_F32: usize = 4;
+    /// Array type matching the SIMD vector width.
     pub type SimdArrayF32 = [f32; 4];
 
+    /// Convert an array to a SIMD vector.
     #[inline]
     pub fn simd_f32_from_array(arr: SimdArrayF32) -> SimdF32 {
         SimdF32::from(arr)
     }
 
+    /// Convert a SIMD vector to an array.
     #[inline]
     pub fn simd_f32_to_array(v: SimdF32) -> SimdArrayF32 {
         v.into()
@@ -876,21 +916,27 @@ mod simd_config_f32 {
 #[cfg(not(target_arch = "aarch64"))]
 mod simd_config_f32 {
     pub use wide::f32x8 as SimdF32;
+    /// Number of f32 lanes in the SIMD vector (8 for AVX2).
     pub const LANES_F32: usize = 8;
+    /// Array type matching the SIMD vector width.
     pub type SimdArrayF32 = [f32; 8];
 
+    /// Convert an array to a SIMD vector.
     #[inline]
     pub fn simd_f32_from_array(arr: SimdArrayF32) -> SimdF32 {
         SimdF32::from(arr)
     }
 
+    /// Convert a SIMD vector to an array.
     #[inline]
     pub fn simd_f32_to_array(v: SimdF32) -> SimdArrayF32 {
         v.into()
     }
 }
 
-pub use simd_config_f32::{simd_f32_from_array, simd_f32_to_array, SimdArrayF32, SimdF32, LANES_F32};
+pub use simd_config_f32::{
+    simd_f32_from_array, simd_f32_to_array, SimdArrayF32, SimdF32, LANES_F32,
+};
 
 /// SIMD-friendly spline table with Structure-of-Arrays layout.
 ///
@@ -1135,7 +1181,7 @@ impl SplineTableSimd {
         let result = f_at_rmin_v.mul_add(extrap_dist, u_spline);
 
         // Zero out values beyond cutoff
-        let mask = rsq.cmp_lt(rsq_max);
+        let mask = rsq.simd_lt(rsq_max);
         result & mask.blend(f64x4::splat(f64::from_bits(!0u64)), f64x4::ZERO)
     }
 
@@ -1344,7 +1390,7 @@ impl SplineTableSimdF32 {
         let zero = f32x4::ZERO;
 
         // Early exit if all distances are beyond cutoff
-        let cutoff_mask = rsq.cmp_lt(rsq_max);
+        let cutoff_mask = rsq.simd_lt(rsq_max);
         if cutoff_mask.none() {
             return zero;
         }
@@ -1450,7 +1496,7 @@ impl SplineTableSimdF32 {
         let f_at_rmin_v = f32x4::splat(self.f_at_rmin);
         let result = f_at_rmin_v.mul_add(extrap_dist, u_spline);
 
-        let mask = rsq.cmp_lt(rsq_max);
+        let mask = rsq.simd_lt(rsq_max);
         result & mask.blend(f32x4::splat(f32::from_bits(!0u32)), f32x4::ZERO)
     }
 
@@ -1472,7 +1518,7 @@ impl SplineTableSimdF32 {
         let zero = SimdF32::ZERO;
 
         // Early exit if all distances are beyond cutoff
-        let cutoff_mask = rsq.cmp_lt(rsq_max);
+        let cutoff_mask = rsq.simd_lt(rsq_max);
         if cutoff_mask.none() {
             return zero;
         }
@@ -1562,7 +1608,7 @@ impl SplineTableSimdF32 {
         let f_at_rmin_v = SimdF32::splat(self.f_at_rmin);
         let result = f_at_rmin_v.mul_add(extrap_dist, u_spline);
 
-        let mask = rsq.cmp_lt(rsq_max);
+        let mask = rsq.simd_lt(rsq_max);
         result & mask.blend(SimdF32::splat(f32::from_bits(!0u32)), SimdF32::ZERO)
     }
 
@@ -1582,7 +1628,7 @@ impl SplineTableSimdF32 {
         let zero = SimdF32::ZERO;
 
         // Early exit if all distances are beyond cutoff
-        let cutoff_mask = rsq.cmp_lt(rsq_max);
+        let cutoff_mask = rsq.simd_lt(rsq_max);
         if cutoff_mask.none() {
             return zero;
         }
@@ -1632,7 +1678,7 @@ impl SplineTableSimdF32 {
         let zero = SimdF32::ZERO;
 
         // Early exit if all distances are beyond cutoff
-        let cutoff_mask = rsq.cmp_lt(rsq_max);
+        let cutoff_mask = rsq.simd_lt(rsq_max);
         if cutoff_mask.none() {
             return zero;
         }
@@ -2110,7 +2156,10 @@ mod tests {
                 assert!(
                     rel_err < 0.1,
                     "UniformRsq error at rsq={}: spline={}, exact={}, err={}",
-                    rsq, u_spline, u_exact, rel_err
+                    rsq,
+                    u_spline,
+                    u_exact,
+                    rel_err
                 );
             } else {
                 assert_eq!(u_spline, 0.0, "Beyond cutoff should be zero");
@@ -2972,9 +3021,7 @@ mod tests {
         let simd_f32 = SplineTableSimdF32::from_spline(&splined);
 
         // Test batch of distances
-        let distances_f32: Vec<f32> = (0..100)
-            .map(|i| 1.0f32 + 0.05 * i as f32)
-            .collect();
+        let distances_f32: Vec<f32> = (0..100).map(|i| 1.0f32 + 0.05 * i as f32).collect();
 
         // Scalar f64 results (ground truth)
         let scalar_sum: f64 = distances_f32
@@ -3010,9 +3057,7 @@ mod tests {
         let splined = SplinedPotential::with_cutoff(&lj, cutoff, config);
         let simd_f32 = SplineTableSimdF32::from_spline(&splined);
 
-        let distances: Vec<f32> = (0..100)
-            .map(|i| 0.8f32 + 0.04 * i as f32)
-            .collect();
+        let distances: Vec<f32> = (0..100).map(|i| 0.8f32 + 0.04 * i as f32).collect();
 
         let scalar_sum: f32 = distances.iter().map(|&rsq| simd_f32.energy(rsq)).sum();
         let simd_sum = simd_f32.sum_energies_simd(&distances);

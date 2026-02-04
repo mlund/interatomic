@@ -33,6 +33,7 @@ pub struct CosineTorsion {
 }
 
 impl CosineTorsion {
+    /// Create a new cosine torsion potential with equilibrium angle and spring constant.
     pub const fn new(eq_angle: f64, spring_constant: f64) -> Self {
         Self {
             eq_angle,

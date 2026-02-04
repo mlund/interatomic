@@ -47,6 +47,7 @@ pub struct Harmonic {
 }
 
 impl Harmonic {
+    /// Create a new harmonic potential with equilibrium distance and spring constant.
     pub const fn new(eq_distance: f64, spring_constant: f64) -> Self {
         Self {
             eq_distance,

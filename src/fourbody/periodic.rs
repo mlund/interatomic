@@ -35,6 +35,7 @@ pub struct PeriodicDihedral {
 }
 
 impl PeriodicDihedral {
+    /// Create a new periodic dihedral potential with phase angle, spring constant, and periodicity.
     pub const fn new(phase_angle: f64, spring_constant: f64, periodicity: f64) -> Self {
         Self {
             phase_angle,

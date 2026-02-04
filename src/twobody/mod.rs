@@ -65,6 +65,7 @@ pub use wca::WeeksChandlerAndersen;
 pub struct RelativeOrientation {
     /// Distance between the two particles
     pub distance: Vector3,
+    /// Orientation vector of the particles
     pub orientation: Vector3,
 }
 
@@ -152,6 +153,7 @@ impl IsotropicTwobodyEnergy for NoInteraction {
 pub struct Combined<T, U>(T, U);
 
 impl<T: IsotropicTwobodyEnergy, U: IsotropicTwobodyEnergy> Combined<T, U> {
+    /// Create a new combined potential from two isotropic twobody potentials.
     pub const fn new(t: T, u: U) -> Self {
         Self(t, u)
     }
@@ -200,6 +202,7 @@ impl IsotropicTwobodyEnergy for Box<dyn IsotropicTwobodyEnergy> {
 pub struct ArcPotential(pub Arc<dyn IsotropicTwobodyEnergy>);
 
 impl ArcPotential {
+    /// Create a new thread-safe shared potential wrapper.
     pub fn new<T: IsotropicTwobodyEnergy + 'static>(potential: T) -> Self {
         Self(Arc::new(potential))
     }

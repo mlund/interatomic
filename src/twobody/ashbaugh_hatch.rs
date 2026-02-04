@@ -57,6 +57,7 @@ pub struct AshbaughHatch {
 }
 
 impl AshbaughHatch {
+    /// Create a new Ashbaugh-Hatch potential from a Lennard-Jones potential, lambda parameter, and cutoff.
     pub const fn new(lennard_jones: LennardJones, lambda: f64, cutoff: f64) -> Self {
         Self {
             lennard_jones,

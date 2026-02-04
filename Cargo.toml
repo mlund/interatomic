@@ -1,6 +1,6 @@
 [package]
 name = "interatomic"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "Library for calculating inter-particle interactions"
 readme = "README.md"
@@ -20,7 +20,7 @@ itertools = "0.10"
 nalgebra = { version = "0.34.1", features = ["serde-serialize"] }
 num = "0.4"
 physical_constants = "0.5"
-coulomb = { git = "https://github.com/mlund/coulomb.git", features = ["serde"] }
+coulomb = { version = "0.3", features = ["serde"] }
 dyn-clone = "1.0.17"
 wide = "1.1"
 

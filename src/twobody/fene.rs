@@ -37,6 +37,7 @@ pub struct FENE {
 }
 
 impl FENE {
+    /// Create a new FENE potential with equilibrium distance, maximum distance, and force constant.
     pub const fn new(
         equilibrium_distance: f64,
         maximum_distance: f64,
