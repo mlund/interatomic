@@ -98,7 +98,7 @@ impl IsotropicTwobodyEnergy for AshbaughHatch {
             <= self.lennard_jones.sigma_squared * WeeksChandlerAndersen::TWOTOTWOSIXTH
         {
             self.lennard_jones
-                .get_epsilon()
+                .epsilon()
                 .mul_add(1.0 - self.lambda, self.lambda.mul_add(-lj_rc, lj))
         } else {
             self.lambda * (lj - lj_rc)
@@ -113,8 +113,8 @@ impl Display for AshbaughHatch {
             "Ashbaugh-Hatch with λ = {:.3}, cutoff = {:.3}, ε = {:.3}, σ = {:.3}",
             self.lambda,
             self.cutoff,
-            self.lennard_jones.get_epsilon(),
-            self.lennard_jones.get_sigma()
+            self.lennard_jones.epsilon(),
+            self.lennard_jones.sigma()
         )
     }
 }

@@ -101,10 +101,10 @@ impl<T: MultipoleEnergy + Cutoff> Cutoff for IonIon<T> {
 }
 
 /// Alias for ion-ion with Yukawa
-pub type IonIonYukawa<'a> = IonIon<coulomb::pairwise::Yukawa>;
+pub type IonIonYukawa = IonIon<coulomb::pairwise::Yukawa>;
 
 /// Alias for ion-ion with a plain Coulomb potential that can be screened
-pub type IonIonPlain<'a> = IonIon<coulomb::pairwise::Plain>;
+pub type IonIonPlain = IonIon<coulomb::pairwise::Plain>;
 
 /// Ion-ion interaction with added ion-induced dipole energy
 #[derive(Clone, PartialEq, Debug)]

@@ -85,15 +85,15 @@ impl KimHummer {
         f64::powf(2.0, 1.0 / 6.0) * self.sigma
     }
 
-    /// Get epsilon parameter (interaction strength)
+    /// Returns the epsilon parameter (interaction strength)
     #[inline(always)]
-    pub const fn get_epsilon(&self) -> f64 {
+    pub const fn epsilon(&self) -> f64 {
         self.epsilon
     }
 
-    /// Get sigma parameter (contact distance)
+    /// Returns the sigma parameter (contact distance)
     #[inline(always)]
-    pub const fn get_sigma(&self) -> f64 {
+    pub const fn sigma(&self) -> f64 {
         self.sigma
     }
 }

@@ -88,14 +88,14 @@ impl LennardJones {
         }
     }
 
-    /// Get epsilon parameter
+    /// Returns the epsilon parameter (well depth)
     #[inline(always)]
-    pub const fn get_epsilon(&self) -> f64 {
+    pub const fn epsilon(&self) -> f64 {
         self.four_times_epsilon * 0.25
     }
 
-    /// Get sigma parameter
-    pub fn get_sigma(&self) -> f64 {
+    /// Returns the sigma parameter (diameter)
+    pub fn sigma(&self) -> f64 {
         self.sigma_squared.sqrt()
     }
 }
@@ -132,8 +132,8 @@ impl Display for LennardJones {
         write!(
             f,
             "Lennard-Jones: ε = {:.3}, σ = {:.3}",
-            self.get_epsilon(),
-            self.get_sigma()
+            self.epsilon(),
+            self.sigma()
         )
     }
 }
