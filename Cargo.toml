@@ -26,7 +26,7 @@ wide = "1.1"
 
 [dev-dependencies]
 approx = "0.5"
-criterion = "0.5"
+criterion = "0.8"
 
 [[bench]]
 name = "twobody"
