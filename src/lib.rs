@@ -38,6 +38,7 @@ use self::combination_rule::{
 pub mod fourbody;
 pub mod threebody;
 pub mod twobody;
+pub use coulomb;
 pub use coulomb::Cutoff;
 
 /// Electrostatic prefactor, e²/4πε₀ × 10⁷ × NA (Å × kJ / mol).
