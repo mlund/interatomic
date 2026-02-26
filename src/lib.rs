@@ -36,7 +36,6 @@ use self::combination_rule::{
 };
 
 pub mod fourbody;
-pub mod spline;
 pub mod threebody;
 pub mod twobody;
 pub use coulomb::Cutoff;
