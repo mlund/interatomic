@@ -1219,7 +1219,7 @@ impl SplineTableSimd {
 
     /// Sum energies for a batch using SIMD (common MD pattern).
     #[inline]
-    pub fn sum_energies_simd(&self, rsq_values: &[f64]) -> f64 {
+    pub fn energy_batch(&self, rsq_values: &[f64]) -> f64 {
         let n = rsq_values.len();
         let chunks = n / 4;
         let mut sum = f64x4::ZERO;
@@ -1718,7 +1718,7 @@ impl SplineTableSimdF32 {
 
     /// Sum energies for a batch using architecture-optimal SIMD.
     #[inline]
-    pub fn sum_energies_simd(&self, rsq_values: &[f32]) -> f32 {
+    pub fn energy_batch(&self, rsq_values: &[f32]) -> f32 {
         let n = rsq_values.len();
         let chunks = n / LANES_F32;
         let mut sum = SimdF32::ZERO;
@@ -2199,7 +2199,7 @@ mod tests {
             .sum();
 
         // SIMD results
-        let simd_sum = simd.sum_energies_simd(&distances);
+        let simd_sum = simd.energy_batch(&distances);
 
         let rel_err = ((scalar_sum - simd_sum) / scalar_sum).abs();
         assert!(
@@ -2453,7 +2453,7 @@ mod tests {
             .map(|&r2| splined.isotropic_twobody_energy(r2))
             .sum();
 
-        let simd_sum = simd.sum_energies_simd(&distances);
+        let simd_sum = simd.energy_batch(&distances);
 
         let rel_err = ((scalar_sum - simd_sum) / scalar_sum).abs();
         assert!(
@@ -2822,7 +2822,7 @@ mod tests {
             .map(|&r2| splined.isotropic_twobody_energy(r2))
             .sum();
 
-        let simd_sum = simd.sum_energies_simd(&distances);
+        let simd_sum = simd.energy_batch(&distances);
 
         let rel_err = ((scalar_sum - simd_sum) / scalar_sum).abs();
         assert!(
@@ -3033,7 +3033,7 @@ mod tests {
             .sum();
 
         // f32 SIMD results
-        let simd_sum = simd_f32.sum_energies_simd(&distances_f32) as f64;
+        let simd_sum = simd_f32.energy_batch(&distances_f32) as f64;
 
         let rel_err = ((scalar_sum - simd_sum) / scalar_sum).abs();
         assert!(
@@ -3063,7 +3063,7 @@ mod tests {
         let distances: Vec<f32> = (0..100).map(|i| 0.8f32 + 0.04 * i as f32).collect();
 
         let scalar_sum: f32 = distances.iter().map(|&rsq| simd_f32.energy(rsq)).sum();
-        let simd_sum = simd_f32.sum_energies_simd(&distances);
+        let simd_sum = simd_f32.energy_batch(&distances);
 
         let rel_err = ((scalar_sum - simd_sum) / scalar_sum).abs();
         assert!(
