@@ -13,9 +13,14 @@ repository = "https://github.com/mlund/interatomic"
 
 [lib]
 
+[features]
+serde = ["dep:serde"]
+custom = ["dep:exmex"]
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"], optional = true }
 anyhow = "1.0"
+exmex = { version = "0.20", features = ["partial"], optional = true }
 itertools = "0.10"
 nalgebra = { version = "0.34.1", features = ["serde-serialize"] }
 num = "0.4"

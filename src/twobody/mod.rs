@@ -27,6 +27,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 mod ashbaugh_hatch;
+#[cfg(feature = "custom")]
+mod custom;
 mod fene;
 mod hardsphere;
 mod harmonic;
@@ -40,6 +42,8 @@ pub mod potential;
 mod ureybradley;
 mod wca;
 pub use ashbaugh_hatch::AshbaughHatch;
+#[cfg(feature = "custom")]
+pub use custom::{CustomPotential, CustomPotentialError};
 pub use fene::FENE;
 pub use hardsphere::HardSphere;
 pub use harmonic::Harmonic;
