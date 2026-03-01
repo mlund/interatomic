@@ -196,6 +196,17 @@ fn substitute_parameters(expression: &str, parameters: &[(&str, f64)]) -> String
     result
 }
 
+/// Two `CustomPotential`s are equal if they were built from the same expression,
+/// constants, and cutoffs. The parsed `FlatEx` fields are derived from these.
+impl PartialEq for CustomPotential {
+    fn eq(&self, other: &Self) -> bool {
+        self.expression_string == other.expression_string
+            && self.constants == other.constants
+            && self.cutoff == other.cutoff
+            && self.lower_cutoff == other.lower_cutoff
+    }
+}
+
 impl fmt::Debug for CustomPotential {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CustomPotential")
