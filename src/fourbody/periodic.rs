@@ -12,9 +12,7 @@
 // See the license for the specific language governing permissions and
 // limitations under the license.
 
-//! Implementation of the periodic dihedral (work in progress).
-
-#![allow(dead_code)]
+//! Implementation of the periodic dihedral potential.
 
 use super::FourbodyAngleEnergy;
 #[cfg(feature = "serde")]
@@ -48,8 +46,38 @@ impl PeriodicDihedral {
 }
 
 impl FourbodyAngleEnergy for PeriodicDihedral {
+    /// Energy: k * (1 + cos(n*θ - φ)), where θ and φ are in degrees.
     #[inline(always)]
-    fn fourbody_angle_energy(&self, _angle: f64) -> f64 {
-        todo!("Periodic dihedral is not yet implemented.")
+    fn fourbody_angle_energy(&self, angle: f64) -> f64 {
+        let angle_rad = angle.to_radians();
+        let phase_rad = self.phase_angle.to_radians();
+        self.spring_constant * (1.0 + (self.periodicity * angle_rad - phase_rad).cos())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    #[test]
+    fn periodic_dihedral_energy() {
+        // k=10, n=2, phi=180°, angle=0° → 10*(1+cos(0-π)) = 0
+        let pot = PeriodicDihedral::new(180.0, 10.0, 2.0);
+        assert_relative_eq!(pot.fourbody_angle_energy(0.0), 0.0, epsilon = 1e-10);
+
+        // k=10, n=2, phi=180°, angle=90° → 10*(1+cos(π-π)) = 20
+        assert_relative_eq!(pot.fourbody_angle_energy(90.0), 20.0, epsilon = 1e-10);
+
+        // k=5, n=3, phi=0°, angle=60° → 5*(1+cos(π)) = 0
+        let pot2 = PeriodicDihedral::new(0.0, 5.0, 3.0);
+        assert_relative_eq!(pot2.fourbody_angle_energy(60.0), 0.0, epsilon = 1e-10);
+
+        // k=5, n=3, phi=0°, angle=0° → 5*(1+cos(0)) = 10
+        assert_relative_eq!(pot2.fourbody_angle_energy(0.0), 10.0, epsilon = 1e-10);
+
+        // k=1, n=1, phi=0°, angle=180° → 1*(1+cos(π)) = 0
+        let pot3 = PeriodicDihedral::new(0.0, 1.0, 1.0);
+        assert_relative_eq!(pot3.fourbody_angle_energy(180.0), 0.0, epsilon = 1e-10);
     }
 }
