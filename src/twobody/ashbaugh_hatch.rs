@@ -104,6 +104,14 @@ impl IsotropicTwobodyEnergy for AshbaughHatch {
             self.lambda * (lj - lj_rc)
         }
     }
+
+    #[inline(always)]
+    fn isotropic_twobody_force(&self, distance_squared: f64) -> f64 {
+        if distance_squared > self.cutoff_squared() {
+            return 0.0;
+        }
+        self.lambda * self.lennard_jones.isotropic_twobody_force(distance_squared)
+    }
 }
 
 impl Display for AshbaughHatch {
@@ -116,5 +124,31 @@ impl Display for AshbaughHatch {
             self.lennard_jones.epsilon(),
             self.lennard_jones.sigma()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    #[test]
+    fn test_ashbaugh_hatch_force() {
+        let lj = LennardJones::new(1.5, 2.0);
+        let cutoff = 5.0;
+        // λ=1: identical to LJ
+        let ah1 = AshbaughHatch::new(lj.clone(), 1.0, cutoff);
+        assert_relative_eq!(
+            ah1.isotropic_twobody_force(6.25),
+            lj.isotropic_twobody_force(6.25)
+        );
+        // λ=0.5: half the LJ force
+        let ah05 = AshbaughHatch::new(lj.clone(), 0.5, cutoff);
+        assert_relative_eq!(
+            ah05.isotropic_twobody_force(6.25),
+            0.5 * lj.isotropic_twobody_force(6.25)
+        );
+        // Beyond cutoff: zero
+        assert_relative_eq!(ah05.isotropic_twobody_force(30.0), 0.0);
     }
 }

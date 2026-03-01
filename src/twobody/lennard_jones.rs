@@ -119,6 +119,13 @@ impl IsotropicTwobodyEnergy for LennardJones {
         let x = x * x * x; // σ⁶/r⁶
         self.four_times_epsilon * x.mul_add(x, -x)
     }
+
+    #[inline(always)]
+    fn isotropic_twobody_force(&self, distance_squared: f64) -> f64 {
+        let x = self.sigma_squared / distance_squared; // (σ/r)²
+        let x = x * x * x; // (σ/r)⁶
+        3.0 * self.four_times_epsilon * x * (2.0 * x - 1.0) / distance_squared
+    }
 }
 
 impl From<AshbaughHatch> for LennardJones {
@@ -135,5 +142,27 @@ impl Display for LennardJones {
             self.epsilon(),
             self.sigma()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    #[test]
+    fn test_lennard_jones_force() {
+        let lj = LennardJones::new(1.5, 2.0);
+        // At r=σ (r²=4.0): force > 0 (repulsive)
+        assert_relative_eq!(lj.isotropic_twobody_force(4.0), 4.5, epsilon = 1e-10);
+        // At r=2^(1/6)σ (minimum, r²≈5.0397): force = 0
+        let r2_min = 4.0 * 1.2599210498948732;
+        assert_relative_eq!(lj.isotropic_twobody_force(r2_min), 0.0, epsilon = 1e-10);
+        // At r=2.5 (r²=6.25): force < 0 (attractive well slope)
+        assert_relative_eq!(
+            lj.isotropic_twobody_force(6.25),
+            -0.359150764401,
+            epsilon = 1e-6
+        );
     }
 }

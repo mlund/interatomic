@@ -61,10 +61,37 @@ impl IsotropicTwobodyEnergy for Harmonic {
     fn isotropic_twobody_energy(&self, distance_squared: f64) -> f64 {
         0.5 * self.spring_constant * (distance_squared.sqrt() - self.eq_distance).powi(2)
     }
+
+    #[inline(always)]
+    fn isotropic_twobody_force(&self, distance_squared: f64) -> f64 {
+        let r = distance_squared.sqrt();
+        -self.spring_constant * (r - self.eq_distance) / (2.0 * r)
+    }
 }
 
 impl Cutoff for Harmonic {
     fn cutoff(&self) -> f64 {
         f64::INFINITY
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    #[test]
+    fn test_harmonic_force() {
+        let h = Harmonic::new(2.0, 100.0);
+        // At r=r_eq: force = 0
+        assert_relative_eq!(h.isotropic_twobody_force(4.0), 0.0, epsilon = 1e-10);
+        // At r=3 (stretched): negative (attractive, wants to contract)
+        assert_relative_eq!(
+            h.isotropic_twobody_force(9.0),
+            -100.0 / 6.0,
+            epsilon = 1e-10
+        );
+        // At r=1 (compressed): positive (repulsive, wants to expand)
+        assert_relative_eq!(h.isotropic_twobody_force(1.0), 50.0, epsilon = 1e-10);
     }
 }

@@ -77,6 +77,11 @@ impl IsotropicTwobodyEnergy for HardSphere {
             0.0
         }
     }
+
+    #[inline(always)]
+    fn isotropic_twobody_force(&self, _distance_squared: f64) -> f64 {
+        0.0
+    }
 }
 
 impl Cutoff for HardSphere {
@@ -85,5 +90,17 @@ impl Cutoff for HardSphere {
     }
     fn cutoff_squared(&self) -> f64 {
         self.min_distance_squared
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hardsphere_force() {
+        let hs = HardSphere::new(2.0);
+        assert_eq!(hs.isotropic_twobody_force(1.0), 0.0);
+        assert_eq!(hs.isotropic_twobody_force(5.0), 0.0);
     }
 }

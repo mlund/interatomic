@@ -47,4 +47,40 @@ impl FourbodyAngleEnergy for HarmonicDihedral {
     fn fourbody_angle_energy(&self, angle: f64) -> f64 {
         0.5 * self.spring_constant * (angle - self.eq_angle).powi(2)
     }
+
+    #[inline(always)]
+    fn fourbody_angle_force(&self, angle: f64) -> f64 {
+        -self.spring_constant * (angle - self.eq_angle)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+    use std::f64::consts::{FRAC_PI_2, FRAC_PI_6};
+
+    #[test]
+    fn test_harmonic_dihedral_force() {
+        let dihedral = HarmonicDihedral::new(FRAC_PI_2, 100.0);
+        // Energy at 120° in radians
+        let phi = 2.0 * std::f64::consts::PI / 3.0;
+        assert_relative_eq!(
+            dihedral.fourbody_angle_energy(phi),
+            13.7077838904,
+            epsilon = 1e-6
+        );
+        // Force = -k(φ - φ_eq) = -100*(2π/3 - π/2) = -100*π/6
+        assert_relative_eq!(
+            dihedral.fourbody_angle_force(phi),
+            -100.0 * FRAC_PI_6,
+            epsilon = 1e-6
+        );
+        // At equilibrium: force = 0
+        assert_relative_eq!(
+            dihedral.fourbody_angle_force(FRAC_PI_2),
+            0.0,
+            epsilon = 1e-10
+        );
+    }
 }

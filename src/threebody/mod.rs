@@ -28,6 +28,13 @@ pub use harmonic::HarmonicTorsion;
 pub trait ThreebodyAngleEnergy: DynClone {
     /// Interaction energy between three particles.
     fn threebody_angle_energy(&self, angle: f64) -> f64;
+
+    /// Torque: -dU/dθ. Default uses central difference.
+    fn threebody_angle_force(&self, angle: f64) -> f64 {
+        const EPS: f64 = 1e-6;
+        -(self.threebody_angle_energy(angle + EPS) - self.threebody_angle_energy(angle - EPS))
+            / (2.0 * EPS)
+    }
 }
 
 dyn_clone::clone_trait_object!(ThreebodyAngleEnergy);

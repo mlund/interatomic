@@ -47,4 +47,33 @@ impl ThreebodyAngleEnergy for HarmonicTorsion {
     fn threebody_angle_energy(&self, angle: f64) -> f64 {
         0.5 * self.spring_constant * (angle - self.eq_angle).powi(2)
     }
+
+    #[inline(always)]
+    fn threebody_angle_force(&self, angle: f64) -> f64 {
+        -self.spring_constant * (angle - self.eq_angle)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+    use std::f64::consts::{FRAC_PI_2, FRAC_PI_4};
+
+    #[test]
+    fn test_harmonic_torsion_force() {
+        let torsion = HarmonicTorsion::new(FRAC_PI_4, 1.0);
+        // At θ=π/2: force = -1*(π/2 - π/4) = -π/4
+        assert_relative_eq!(
+            torsion.threebody_angle_force(FRAC_PI_2),
+            -FRAC_PI_4,
+            epsilon = 1e-10
+        );
+        // At equilibrium: force = 0
+        assert_relative_eq!(
+            torsion.threebody_angle_force(FRAC_PI_4),
+            0.0,
+            epsilon = 1e-10
+        );
+    }
 }

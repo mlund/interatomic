@@ -162,6 +162,12 @@ impl<T: IsotropicTwobodyEnergy + Clone, U: IsotropicTwobodyEnergy + Clone> Isotr
         self.0.isotropic_twobody_energy(distance_squared)
             + self.1.isotropic_twobody_energy(distance_squared)
     }
+
+    #[inline(always)]
+    fn isotropic_twobody_force(&self, distance_squared: f64) -> f64 {
+        self.0.isotropic_twobody_force(distance_squared)
+            + self.1.isotropic_twobody_force(distance_squared)
+    }
 }
 
 impl<T: Cutoff, U: Cutoff> Cutoff for Combined<T, U> {
@@ -185,6 +191,10 @@ impl Cutoff for Box<dyn IsotropicTwobodyEnergy> {
 impl IsotropicTwobodyEnergy for Box<dyn IsotropicTwobodyEnergy> {
     fn isotropic_twobody_energy(&self, distance_squared: f64) -> f64 {
         self.as_ref().isotropic_twobody_energy(distance_squared)
+    }
+
+    fn isotropic_twobody_force(&self, distance_squared: f64) -> f64 {
+        self.as_ref().isotropic_twobody_force(distance_squared)
     }
 }
 
@@ -215,6 +225,10 @@ impl Cutoff for ArcPotential {
 impl IsotropicTwobodyEnergy for ArcPotential {
     fn isotropic_twobody_energy(&self, distance_squared: f64) -> f64 {
         self.0.isotropic_twobody_energy(distance_squared)
+    }
+
+    fn isotropic_twobody_force(&self, distance_squared: f64) -> f64 {
+        self.0.isotropic_twobody_force(distance_squared)
     }
 }
 
@@ -296,6 +310,39 @@ fn test_combined() {
         energy.0 + energy.1 + energy3,
         epsilon = 1e-7
     );
+}
+
+#[test]
+fn test_combined_force() {
+    use approx::assert_relative_eq;
+    let lj = LennardJones::new(1.5, 2.0);
+    let h = Harmonic::new(0.0, 10.0);
+    let combined = Combined::new(lj.clone(), h.clone());
+    let r2 = 6.25;
+    assert_relative_eq!(
+        combined.isotropic_twobody_force(r2),
+        lj.isotropic_twobody_force(r2) + h.isotropic_twobody_force(r2)
+    );
+}
+
+#[test]
+fn test_box_dyn_force() {
+    use approx::assert_relative_eq;
+    let lj = LennardJones::new(1.5, 2.0);
+    let r2 = 6.25;
+    let expected = lj.isotropic_twobody_force(r2);
+    let boxed: Box<dyn IsotropicTwobodyEnergy> = Box::new(lj);
+    assert_relative_eq!(boxed.isotropic_twobody_force(r2), expected);
+}
+
+#[test]
+fn test_arc_potential_force() {
+    use approx::assert_relative_eq;
+    let lj = LennardJones::new(1.5, 2.0);
+    let r2 = 6.25;
+    let expected = lj.isotropic_twobody_force(r2);
+    let arc = ArcPotential::new(lj);
+    assert_relative_eq!(arc.isotropic_twobody_force(r2), expected);
 }
 
 #[test]

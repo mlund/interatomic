@@ -123,6 +123,25 @@ impl IsotropicTwobodyEnergy for KimHummer {
             0.01 * sr12
         }
     }
+
+    #[inline]
+    fn isotropic_twobody_force(&self, distance_squared: f64) -> f64 {
+        let sigma_squared = self.sigma * self.sigma;
+        let x = (sigma_squared / distance_squared).powi(3);
+        if self.epsilon < 0.0 {
+            3.0 * 4.0 * self.epsilon.abs() * x * (2.0 * x - 1.0) / distance_squared
+        } else if self.epsilon > 0.0 {
+            let r0_squared = Self::TWO_TO_TWO_SIXTH * sigma_squared;
+            let lj_force = 3.0 * 4.0 * self.epsilon * x * (2.0 * x - 1.0) / distance_squared;
+            if distance_squared < r0_squared {
+                lj_force
+            } else {
+                -lj_force
+            }
+        } else {
+            0.06 * x * x / distance_squared
+        }
+    }
 }
 
 impl Cutoff for KimHummer {
@@ -315,5 +334,31 @@ mod tests {
             let u = kh.isotropic_twobody_energy(0.0);
             assert!(u.is_nan() || u.is_infinite());
         }
+    }
+
+    #[test]
+    fn test_kimhummer_force() {
+        use crate::twobody::LennardJones;
+
+        let sigma = 6.0;
+        // Attractive: matches LJ(|ε|) force
+        let kh_att = KimHummer::new(-0.5, sigma);
+        let lj = LennardJones::new(0.5, sigma);
+        let r2 = (1.5 * sigma).powi(2);
+        assert_relative_eq!(
+            kh_att.isotropic_twobody_force(r2),
+            lj.isotropic_twobody_force(r2)
+        );
+
+        // Repulsive: continuous force near r₀
+        let kh_rep = KimHummer::new(0.3, sigma);
+        let r0_sq = 1.2599210498948732 * sigma * sigma;
+        let f_below = kh_rep.isotropic_twobody_force(r0_sq - 1e-8);
+        let f_above = kh_rep.isotropic_twobody_force(r0_sq + 1e-8);
+        assert_relative_eq!(f_below, f_above, epsilon = 1e-3);
+
+        // Neutral: always positive force (repulsive)
+        let kh_neut = KimHummer::new(0.0, sigma);
+        assert!(kh_neut.isotropic_twobody_force(r2) > 0.0);
     }
 }

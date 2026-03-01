@@ -28,6 +28,13 @@ pub use periodic::PeriodicDihedral;
 pub trait FourbodyAngleEnergy: DynClone {
     /// Interaction energy between four particles.
     fn fourbody_angle_energy(&self, angle: f64) -> f64;
+
+    /// Torque: -dU/dφ. Default uses central difference.
+    fn fourbody_angle_force(&self, angle: f64) -> f64 {
+        const EPS: f64 = 1e-6;
+        -(self.fourbody_angle_energy(angle + EPS) - self.fourbody_angle_energy(angle - EPS))
+            / (2.0 * EPS)
+    }
 }
 
 dyn_clone::clone_trait_object!(FourbodyAngleEnergy);

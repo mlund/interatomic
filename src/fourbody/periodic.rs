@@ -53,6 +53,18 @@ impl FourbodyAngleEnergy for PeriodicDihedral {
         let phase_rad = self.phase_angle.to_radians();
         self.spring_constant * (1.0 + (self.periodicity * angle_rad - phase_rad).cos())
     }
+
+    /// Force: -dU/dφ (in degrees). Returns k*n*sin(n*θ - φ₀) * π/180.
+    #[inline(always)]
+    fn fourbody_angle_force(&self, angle: f64) -> f64 {
+        let angle_rad = angle.to_radians();
+        let phase_rad = self.phase_angle.to_radians();
+        self.spring_constant
+            * self.periodicity
+            * (self.periodicity * angle_rad - phase_rad).sin()
+            * std::f64::consts::PI
+            / 180.0
+    }
 }
 
 #[cfg(test)]
@@ -79,5 +91,24 @@ mod tests {
         // k=1, n=1, phi=0°, angle=180° → 1*(1+cos(π)) = 0
         let pot3 = PeriodicDihedral::new(0.0, 1.0, 1.0);
         assert_relative_eq!(pot3.fourbody_angle_energy(180.0), 0.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_periodic_dihedral_force() {
+        let pot = PeriodicDihedral::new(0.0, 100.0, 3.0);
+        // Energy cross-checks
+        assert_relative_eq!(pot.fourbody_angle_energy(120.0), 200.0, epsilon = 1e-10);
+        assert_relative_eq!(pot.fourbody_angle_energy(60.0), 0.0, epsilon = 1e-10);
+        assert_relative_eq!(pot.fourbody_angle_energy(90.0), 100.0, epsilon = 1e-10);
+
+        // At φ=90°: -dU/dφ_deg = kn*sin(270°)*π/180 = -300*π/180
+        assert_relative_eq!(
+            pot.fourbody_angle_force(90.0),
+            -300.0 * std::f64::consts::PI / 180.0,
+            epsilon = 1e-10
+        );
+        // At φ=60° and φ=120°: sin(nφ)=sin(180°)=0 and sin(360°)=0 → force=0
+        assert_relative_eq!(pot.fourbody_angle_force(60.0), 0.0, epsilon = 1e-10);
+        assert_relative_eq!(pot.fourbody_angle_force(120.0), 0.0, epsilon = 1e-10);
     }
 }

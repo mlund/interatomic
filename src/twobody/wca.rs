@@ -89,4 +89,33 @@ impl IsotropicTwobodyEnergy for WeeksChandlerAndersen {
         let x6 = (self.lennard_jones.sigma_squared / distance_squared).powi(3); // (σ/r)^6
         self.lennard_jones.four_times_epsilon * (x6 * x6 - x6 + Self::ONEFOURTH)
     }
+
+    #[inline(always)]
+    fn isotropic_twobody_force(&self, distance_squared: f64) -> f64 {
+        if distance_squared > self.cutoff_squared() {
+            return 0.0;
+        }
+        self.lennard_jones.isotropic_twobody_force(distance_squared)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::twobody::LennardJones;
+    use approx::assert_relative_eq;
+
+    #[test]
+    fn test_wca_force() {
+        let (epsilon, sigma) = (1.5, 2.0);
+        let wca = WeeksChandlerAndersen::new(epsilon, sigma);
+        let lj = LennardJones::new(epsilon, sigma);
+        // Inside cutoff: matches LJ force
+        assert_relative_eq!(
+            wca.isotropic_twobody_force(4.0),
+            lj.isotropic_twobody_force(4.0)
+        );
+        // Outside cutoff: zero
+        assert_relative_eq!(wca.isotropic_twobody_force(6.0), 0.0);
+    }
 }

@@ -73,6 +73,21 @@ impl<const N: u32, const M: u32> IsotropicTwobodyEnergy for Mie<N, M> {
         let s_over_r = self.sigma / distance_squared.sqrt(); // (σ/r)
         Self::C * self.epsilon * (s_over_r.powi(N as i32) - s_over_r.powi(M as i32))
     }
+
+    #[inline]
+    fn isotropic_twobody_force(&self, distance_squared: f64) -> f64 {
+        if Self::OPTIMIZE {
+            let x = (self.sigma * self.sigma / distance_squared).powi(Self::M_HALF);
+            let xn = x.powi(Self::N_OVER_M);
+            return Self::C * self.epsilon * (N as f64 * xn - M as f64 * x)
+                / (2.0 * distance_squared);
+        }
+        let s_over_r = self.sigma / distance_squared.sqrt();
+        Self::C
+            * self.epsilon
+            * (N as f64 * s_over_r.powi(N as i32) - M as f64 * s_over_r.powi(M as i32))
+            / (2.0 * distance_squared)
+    }
 }
 
 impl<const N: u32, const M: u32> Cutoff for Mie<N, M> {
@@ -84,5 +99,27 @@ impl<const N: u32, const M: u32> Cutoff for Mie<N, M> {
     }
     fn lower_cutoff(&self) -> f64 {
         self.sigma * 0.6
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::twobody::LennardJones;
+    use approx::assert_relative_eq;
+
+    #[test]
+    fn test_mie_force() {
+        let (eps, sigma) = (1.5, 2.0);
+        let mie = Mie::<12, 6>::new(eps, sigma);
+        let lj = LennardJones::new(eps, sigma);
+        for r in [1.5, 2.0, 2.5, 3.0, 5.0] {
+            let r2 = r * r;
+            assert_relative_eq!(
+                mie.isotropic_twobody_force(r2),
+                lj.isotropic_twobody_force(r2),
+                epsilon = 1e-10
+            );
+        }
     }
 }
