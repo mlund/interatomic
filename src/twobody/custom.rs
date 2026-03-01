@@ -95,6 +95,7 @@ impl std::error::Error for CustomPotentialError {}
 #[derive(Clone)]
 pub struct CustomPotential {
     expression_string: String,
+    constants: Vec<(String, f64)>,
     energy_expr: FlatEx<f64>,
     derivative_expr: FlatEx<f64>,
     cutoff: f64,
@@ -150,6 +151,10 @@ impl CustomPotential {
 
         Ok(Self {
             expression_string: expression.to_string(),
+            constants: parameters
+                .iter()
+                .map(|(k, v)| (k.to_string(), *v))
+                .collect(),
             energy_expr,
             derivative_expr,
             cutoff,
@@ -230,6 +235,54 @@ const _: fn() = || {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<CustomPotential>();
 };
+
+#[cfg(feature = "serde")]
+mod serde_impl {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+    use std::collections::HashMap;
+
+    /// Serialization proxy matching the faunus-rs `CustomPairPotentialBuilder` schema.
+    #[derive(Serialize, Deserialize)]
+    struct CustomPotentialData {
+        function: String,
+        cutoff: f64,
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        constants: HashMap<String, f64>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        lower_cutoff: f64,
+    }
+
+    fn is_zero(v: &f64) -> bool {
+        *v == 0.0
+    }
+
+    impl Serialize for CustomPotential {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            CustomPotentialData {
+                function: self.expression_string.clone(),
+                cutoff: self.cutoff,
+                constants: self.constants.iter().cloned().collect(),
+                lower_cutoff: self.lower_cutoff,
+            }
+            .serialize(serializer)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for CustomPotential {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            let data = CustomPotentialData::deserialize(deserializer)?;
+            let params: Vec<(&str, f64)> = data
+                .constants
+                .iter()
+                .map(|(k, v)| (k.as_str(), *v))
+                .collect();
+            CustomPotential::new(&data.function, &params, data.cutoff)
+                .map(|p| p.with_lower_cutoff(data.lower_cutoff))
+                .map_err(serde::de::Error::custom)
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -445,5 +498,70 @@ mod tests {
 
         let r = 1.0;
         assert_relative_eq!(custom.isotropic_twobody_energy(r * r), 4.0, epsilon = 1e-10);
+    }
+
+    #[cfg(feature = "serde")]
+    mod serde_tests {
+        use super::*;
+
+        #[test]
+        fn serde_round_trip() {
+            let original = CustomPotential::new("1/r^2", &[], 5.0)
+                .unwrap()
+                .with_lower_cutoff(0.5);
+
+            let json = serde_json::to_string(&original).unwrap();
+            let deserialized: CustomPotential = serde_json::from_str(&json).unwrap();
+
+            assert_eq!(deserialized.expression(), original.expression());
+            assert_relative_eq!(deserialized.cutoff(), original.cutoff());
+            assert_relative_eq!(deserialized.lower_cutoff(), original.lower_cutoff());
+
+            // Verify energy evaluation matches after round-trip
+            for &r in &[1.0, 1.5, 2.0, 3.0] {
+                let r2 = r * r;
+                assert_relative_eq!(
+                    deserialized.isotropic_twobody_energy(r2),
+                    original.isotropic_twobody_energy(r2),
+                    epsilon = 1e-10
+                );
+            }
+        }
+
+        #[test]
+        fn serde_with_constants() {
+            let original = CustomPotential::new(
+                "0.5 * k * (r - r0)^2",
+                &[("k", 10.0), ("r0", 1.5)],
+                5.0,
+            )
+            .unwrap();
+
+            let json = serde_json::to_string(&original).unwrap();
+
+            // Verify the serialized form contains the original expression and constants
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(value["function"], "0.5 * k * (r - r0)^2");
+            assert_eq!(value["constants"]["k"], 10.0);
+            assert_eq!(value["constants"]["r0"], 1.5);
+
+            let deserialized: CustomPotential = serde_json::from_str(&json).unwrap();
+
+            for &r in &[1.0, 1.5, 2.0, 3.0] {
+                let r2 = r * r;
+                assert_relative_eq!(
+                    deserialized.isotropic_twobody_energy(r2),
+                    original.isotropic_twobody_energy(r2),
+                    epsilon = 1e-10
+                );
+            }
+        }
+
+        #[test]
+        fn deserialize_invalid_expression() {
+            let json = r#"{"function": "(((/r", "cutoff": 5.0}"#;
+            let result: Result<CustomPotential, _> = serde_json::from_str(json);
+            assert!(result.is_err());
+        }
     }
 }
