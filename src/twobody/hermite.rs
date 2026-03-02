@@ -594,7 +594,9 @@ impl SplinedPotential {
     /// Returns `(index, epsilon)` where `index` is the spline interval and
     /// `epsilon ∈ [0, 1)` is the fractional position within that interval.
     /// The input `r` should already be clamped to `[r_min, r_max]`.
-    #[inline]
+    // Called per pair; must inline so the grid_type match folds into the
+    // caller's loop and the Horner chain becomes visible to the optimizer.
+    #[inline(always)]
     fn compute_index_eps(&self, r: f64) -> (usize, f64) {
         let t = match self.grid_type {
             GridType::UniformRsq => {
@@ -727,7 +729,9 @@ impl IsotropicTwobodyEnergy for SplinedPotential {
     ///
     /// Returns 0.0 if rsq >= cutoff². For rsq < rsq_min, linearly extrapolates
     /// using the slope at r_min to maintain repulsive behavior.
-    #[inline]
+    // Per-pair hot path in nonbonded loops; force-inline so the Horner
+    // evaluation (3 FMA) is visible to the caller and can be pipelined.
+    #[inline(always)]
     fn isotropic_twobody_energy(&self, distance_squared: f64) -> f64 {
         let rsq_max = self.r_max * self.r_max;
 
@@ -755,7 +759,7 @@ impl IsotropicTwobodyEnergy for SplinedPotential {
     ///
     /// Returns 0.0 if rsq >= cutoff². For rsq < rsq_min, returns F(r_min)
     /// (constant force corresponding to linear energy extrapolation).
-    #[inline]
+    #[inline(always)]
     fn isotropic_twobody_force(&self, distance_squared: f64) -> f64 {
         let rsq_max = self.r_max * self.r_max;
         if distance_squared >= rsq_max {
