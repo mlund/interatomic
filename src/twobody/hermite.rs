@@ -735,23 +735,32 @@ impl IsotropicTwobodyEnergy for SplinedPotential {
     fn isotropic_twobody_energy(&self, distance_squared: f64) -> f64 {
         let rsq_max = self.r_max * self.r_max;
 
-        // Fast path: beyond cutoff
         if distance_squared >= rsq_max {
             return 0.0;
         }
 
+        // UniformRsq fast path: index directly from r², avoiding sqrt
+        if let GridType::UniformRsq = self.grid_type {
+            let rsq_min = self.r_min * self.r_min;
+            let rsq = distance_squared.max(rsq_min);
+            let t = (rsq - rsq_min) * self.inv_delta;
+            let i = (t as usize).min(self.n - 2);
+            let eps = t - i as f64;
+            let c = &self.coeffs[i];
+            let u = eps.mul_add(eps.mul_add(eps.mul_add(c.u[3], c.u[2]), c.u[1]), c.u[0]);
+            // Rare: linear extrapolation below r_min (only case needing sqrt)
+            return if distance_squared < rsq_min {
+                u + self.f_at_rmin * (self.r_min - distance_squared.sqrt())
+            } else {
+                u
+            };
+        }
+
         let r = distance_squared.sqrt();
-
-        // Linear extrapolation correction for r < r_min (branchless)
         let extrap_dist = (self.r_min - r).max(0.0);
-
         let (i, eps) = self.compute_index_eps(r);
-
-        // Horner's method for polynomial evaluation
         let c = &self.coeffs[i];
         let u_spline = eps.mul_add(eps.mul_add(eps.mul_add(c.u[3], c.u[2]), c.u[1]), c.u[0]);
-
-        // Add linear extrapolation for r < r_min (branchless)
         self.f_at_rmin.mul_add(extrap_dist, u_spline)
     }
 
@@ -766,9 +775,18 @@ impl IsotropicTwobodyEnergy for SplinedPotential {
             return 0.0;
         }
 
+        if let GridType::UniformRsq = self.grid_type {
+            let rsq_min = self.r_min * self.r_min;
+            let rsq = distance_squared.max(rsq_min);
+            let t = (rsq - rsq_min) * self.inv_delta;
+            let i = (t as usize).min(self.n - 2);
+            let eps = t - i as f64;
+            let c = &self.coeffs[i];
+            return eps.mul_add(eps.mul_add(eps.mul_add(c.f[3], c.f[2]), c.f[1]), c.f[0]);
+        }
+
         let r = distance_squared.sqrt();
         let (i, eps) = self.compute_index_eps(r);
-
         let c = &self.coeffs[i];
         eps.mul_add(eps.mul_add(eps.mul_add(c.f[3], c.f[2]), c.f[1]), c.f[0])
     }
