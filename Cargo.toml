@@ -14,20 +14,24 @@ repository = "https://github.com/mlund/interatomic"
 [lib]
 
 [features]
+default = ["simd"]
 serde = ["dep:serde"]
 custom = ["dep:exmex"]
+gpu = ["dep:bytemuck"]
+simd = ["dep:wide"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"], optional = true }
 anyhow = "1.0"
 exmex = { version = "0.20", features = ["partial"], optional = true }
 itertools = "0.10"
-nalgebra = { version = "0.34.1", features = ["serde-serialize"] }
+nalgebra = { version = "0.34", features = ["serde-serialize"] }
 num = "0.4"
 physical_constants = "0.5"
 coulomb = { version = "0.3", features = ["serde"] }
-dyn-clone = "1.0.17"
-wide = "1.1"
+dyn-clone = "1.0"
+bytemuck = { version = "1", features = ["derive"], optional = true }
+wide = { version = "1.1", optional = true }
 
 [dev-dependencies]
 approx = "0.5"

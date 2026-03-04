@@ -47,9 +47,15 @@ pub use custom::{CustomPotential, CustomPotentialError};
 pub use fene::FENE;
 pub use hardsphere::HardSphere;
 pub use harmonic::Harmonic;
+pub(crate) use hermite::compute_uniform_hermite_coeffs;
+#[cfg(feature = "simd")]
 pub use hermite::{
-    spline_potential, GridType, SplineConfig, SplineStats, SplineTableSimd, SplineTableSimdF32,
-    SplinedPotential, ValidationResult,
+    simd_f32_from_array, simd_f32_to_array, SimdArrayF32, SimdF32, SplineTableSimd,
+    SplineTableSimdF32, LANES_F32,
+};
+pub use hermite::{
+    spline_potential, GridType, SplineCoeffs, SplineConfig, SplineStats, SplinedPotential,
+    ValidationResult,
 };
 pub use kimhummer::KimHummer;
 pub use lennard_jones::LennardJones;

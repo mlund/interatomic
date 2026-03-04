@@ -68,6 +68,61 @@ impl Debug for SplineCoeffs {
     }
 }
 
+/// Compute cubic Hermite spline coefficients for a uniform grid.
+///
+/// Given energy values `u` and force values `f` (where force = -dU/dθ) at
+/// uniformly spaced grid points separated by `delta`, returns polynomial
+/// coefficients for each interval. The last interval is duplicated for
+/// boundary safety.
+///
+/// For each interval with ε ∈ [0, 1):
+/// - `U(ε) = A₀ + A₁·ε + A₂·ε² + A₃·ε³`
+/// - `F(ε) = B₀ + B₁·ε + B₂·ε²` (degree-2, B₃ is always zero)
+pub(crate) fn compute_uniform_hermite_coeffs(
+    u: &[f64],
+    f: &[f64],
+    delta: f64,
+) -> Vec<SplineCoeffs> {
+    let n = u.len();
+    let mut coeffs = Vec::with_capacity(n);
+    let inv_delta = 1.0 / delta;
+
+    for i in 0..n.saturating_sub(1) {
+        let i1 = (i + 1).min(n - 1);
+
+        let u_i = u[i];
+        let u_i1 = u[i1];
+
+        // Force is -dU/dθ, so derivative dU/dθ = -force
+        // Scaled tangent: m_i = dU/dθ_i * delta = -f_i * delta
+        let m_i = -f[i] * delta;
+        let m_i1 = -f[i1] * delta;
+
+        // Cubic Hermite basis coefficients
+        let a0 = u_i;
+        let a1 = m_i;
+        let a2 = 3.0 * (u_i1 - u_i) - 2.0 * m_i - m_i1;
+        let a3 = 2.0 * (u_i - u_i1) + m_i + m_i1;
+
+        // Force coefficients: F(ε) = -(1/Δ) · dU/dε (degree-2 polynomial)
+        let b0 = -a1 * inv_delta;
+        let b1 = -2.0 * a2 * inv_delta;
+        let b2 = -3.0 * a3 * inv_delta;
+
+        coeffs.push(SplineCoeffs {
+            u: [a0, a1, a2, a3],
+            f: [b0, b1, b2, 0.0],
+        });
+    }
+
+    // Duplicate last interval for safety at boundary
+    if let Some(last) = coeffs.last().copied() {
+        coeffs.push(last);
+    }
+
+    coeffs
+}
+
 /// Grid spacing strategy for spline construction.
 ///
 /// The choice of grid type significantly affects accuracy for potentials
@@ -207,6 +262,41 @@ impl SplinedPotential {
     /// Returns a reference to the spline coefficients for all grid intervals.
     pub fn coefficients(&self) -> &[SplineCoeffs] {
         &self.coeffs
+    }
+
+    /// Returns the force at `r_min`, used for linear extrapolation below the grid.
+    pub const fn f_at_rmin(&self) -> f64 {
+        self.f_at_rmin
+    }
+
+    /// Returns the minimum distance of the spline grid.
+    pub const fn r_min(&self) -> f64 {
+        self.r_min
+    }
+
+    /// Returns the maximum distance of the spline grid.
+    pub const fn r_max(&self) -> f64 {
+        self.r_max
+    }
+
+    /// Returns the grid type used for construction.
+    pub const fn grid_type(&self) -> GridType {
+        self.grid_type
+    }
+
+    /// Returns the number of grid points.
+    pub const fn n_points(&self) -> usize {
+        self.n
+    }
+
+    /// Returns the inverse grid spacing.
+    pub const fn inv_delta(&self) -> f64 {
+        self.inv_delta
+    }
+
+    /// Returns the grid spacing.
+    pub const fn delta(&self) -> f64 {
+        self.delta
     }
 
     /// Create a new splined potential from an analytical potential with a Cutoff.
@@ -585,7 +675,7 @@ impl<'a> IntervalData<'a> {
 impl SplinedPotential {
     /// Get the squared cutoff distance.
     #[inline]
-    pub fn cutoff_squared(&self) -> f64 {
+    pub const fn cutoff_squared(&self) -> f64 {
         self.r_max * self.r_max
     }
 
@@ -885,6 +975,7 @@ impl SplinedPotential {
     }
 
     /// Convert to SIMD-friendly SoA layout for batch evaluation (f64).
+    #[cfg(feature = "simd")]
     pub fn to_simd(&self) -> SplineTableSimd {
         SplineTableSimd::from_aos(self)
     }
@@ -893,6 +984,7 @@ impl SplinedPotential {
     ///
     /// Uses architecture-optimal SIMD width: f32x8 on x86_64, f32x4 on aarch64.
     /// Provides ~2x memory efficiency at the cost of reduced precision.
+    #[cfg(feature = "simd")]
     pub fn to_simd_f32(&self) -> SplineTableSimdF32 {
         SplineTableSimdF32::from_spline(self)
     }
@@ -902,9 +994,10 @@ impl SplinedPotential {
 // SIMD batch evaluation with Structure-of-Arrays layout
 // ============================================================================
 
+#[cfg(feature = "simd")]
 use wide::{f32x4, f64x4, CmpLt};
 
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(all(feature = "simd", not(target_arch = "aarch64")))]
 use wide::f32x8;
 
 // ============================================================================
@@ -914,7 +1007,7 @@ use wide::f32x8;
 /// Compile-time SIMD configuration for f32 based on target architecture.
 /// - x86_64: f32x8 (AVX2, 256-bit, 8 lanes)
 /// - aarch64: f32x4 (NEON, 128-bit, 4 lanes)
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
 mod simd_config_f32 {
     pub use wide::f32x4 as SimdF32;
     /// Number of f32 lanes in the SIMD vector (4 for NEON).
@@ -935,7 +1028,7 @@ mod simd_config_f32 {
     }
 }
 
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(all(feature = "simd", not(target_arch = "aarch64")))]
 mod simd_config_f32 {
     pub use wide::f32x8 as SimdF32;
     /// Number of f32 lanes in the SIMD vector (8 for AVX2).
@@ -956,10 +1049,12 @@ mod simd_config_f32 {
     }
 }
 
+#[cfg(feature = "simd")]
 pub use simd_config_f32::{
     simd_f32_from_array, simd_f32_to_array, SimdArrayF32, SimdF32, LANES_F32,
 };
 
+#[cfg(feature = "simd")]
 /// SIMD-friendly spline table with Structure-of-Arrays layout.
 ///
 /// Stores coefficients in a layout optimized for SIMD gather operations,
@@ -987,6 +1082,7 @@ pub struct SplineTableSimd {
     f_at_rmin: f64,
 }
 
+#[cfg(feature = "simd")]
 impl SplineTableSimd {
     /// Create SoA layout from AoS SplinedPotential
     pub fn from_aos(spline: &SplinedPotential) -> Self {
@@ -1283,6 +1379,7 @@ impl SplineTableSimd {
     }
 }
 
+#[cfg(feature = "simd")]
 impl Debug for SplineTableSimd {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SplineTableSimd")
@@ -1298,6 +1395,7 @@ impl Debug for SplineTableSimd {
 // Single-precision (f32) SIMD evaluation
 // ============================================================================
 
+#[cfg(feature = "simd")]
 /// Single-precision SIMD spline table with architecture-specific width.
 ///
 /// Uses f32x8 (8 lanes) on x86_64 with AVX2, f32x4 (4 lanes) on aarch64 with NEON.
@@ -1319,6 +1417,7 @@ pub struct SplineTableSimdF32 {
     f_at_rmin: f32,
 }
 
+#[cfg(feature = "simd")]
 impl SplineTableSimdF32 {
     /// Create f32 AoS layout from f64 SplinedPotential.
     ///
@@ -1769,6 +1868,7 @@ impl SplineTableSimdF32 {
     }
 }
 
+#[cfg(feature = "simd")]
 impl Debug for SplineTableSimdF32 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SplineTableSimdF32")
@@ -2203,6 +2303,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "simd")]
     fn test_simd_matches_scalar() {
         let lj = LennardJones::new(1.0, 1.0);
         let cutoff = 2.5;
@@ -2234,6 +2335,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "simd")]
     fn test_simd_batch_output() {
         let lj = LennardJones::new(1.0, 1.0);
         let cutoff = 2.5;
@@ -2458,6 +2560,7 @@ mod tests {
 
     /// Test that PowerLaw2 SIMD matches scalar.
     #[test]
+    #[cfg(feature = "simd")]
     fn test_powerlaw2_simd_matches_scalar() {
         let lj = LennardJones::new(1.0, 1.0);
         let cutoff = 2.5;
@@ -2827,6 +2930,7 @@ mod tests {
 
     /// Test that InverseRsq SIMD matches scalar.
     #[test]
+    #[cfg(feature = "simd")]
     fn test_inversersq_simd_matches_scalar() {
         let lj = LennardJones::new(1.0, 1.0);
         let cutoff = 2.5;
@@ -3002,6 +3106,7 @@ mod tests {
 
     /// Test that SIMD extrapolation matches scalar.
     #[test]
+    #[cfg(feature = "simd")]
     fn test_simd_extrapolation_matches_scalar() {
         let lj = LennardJones::new(1.0, 1.0);
         let cutoff = 2.5;
@@ -3039,6 +3144,7 @@ mod tests {
 
     /// Test f32 SIMD matches f64 scalar within single-precision tolerance.
     #[test]
+    #[cfg(feature = "simd")]
     fn test_f32_simd_matches_scalar() {
         let lj = LennardJones::new(1.0, 1.0);
         let cutoff = 2.5;
@@ -3075,6 +3181,7 @@ mod tests {
 
     /// Test f32 PowerLaw2 SIMD matches scalar.
     #[test]
+    #[cfg(feature = "simd")]
     fn test_f32_powerlaw2_simd() {
         let lj = LennardJones::new(1.0, 1.0);
         let cutoff = 2.5;
