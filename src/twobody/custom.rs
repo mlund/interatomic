@@ -541,12 +541,9 @@ mod tests {
 
         #[test]
         fn serde_with_constants() {
-            let original = CustomPotential::new(
-                "0.5 * k * (r - r0)^2",
-                &[("k", 10.0), ("r0", 1.5)],
-                5.0,
-            )
-            .unwrap();
+            let original =
+                CustomPotential::new("0.5 * k * (r - r0)^2", &[("k", 10.0), ("r0", 1.5)], 5.0)
+                    .unwrap();
 
             let json = serde_json::to_string(&original).unwrap();
 

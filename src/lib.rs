@@ -36,6 +36,8 @@ use self::combination_rule::{
 };
 
 pub mod fourbody;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod threebody;
 pub mod twobody;
 pub use coulomb;

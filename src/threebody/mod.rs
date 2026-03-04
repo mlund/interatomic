@@ -20,9 +20,11 @@ use dyn_clone::DynClone;
 
 pub mod cosine;
 pub mod harmonic;
+pub mod spline;
 
 pub use cosine::CosineTorsion;
 pub use harmonic::HarmonicTorsion;
+pub use spline::SplinedAngle;
 
 /// Potential energy between three particles as a function of angle between them.
 pub trait ThreebodyAngleEnergy: DynClone {
