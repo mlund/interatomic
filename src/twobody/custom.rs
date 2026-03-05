@@ -374,21 +374,36 @@ mod tests {
 
     #[test]
     fn morse_potential_at_equilibrium() {
-        // U(r) = D * (1 - exp(-a*(r - r0)))^2
-        // At r = r0: U = 0
-        let custom = CustomPotential::new(
-            "D * (1 - exp(neg_a * (r - r0)))^2",
-            &[("D", 5.0), ("neg_a", -1.5), ("r0", 2.0)],
-            10.0,
-        )
-        .unwrap();
+        fn inner() {
+            // U(r) = D * (1 - exp(-a*(r - r0)))^2
+            // At r = r0: U = 0
+            let custom = CustomPotential::new(
+                "D * (1 - exp(neg_a * (r - r0)))^2",
+                &[("D", 5.0), ("neg_a", -1.5), ("r0", 2.0)],
+                10.0,
+            )
+            .unwrap();
 
-        let r0 = 2.0;
-        assert_relative_eq!(
-            custom.isotropic_twobody_energy(r0 * r0),
-            0.0,
-            epsilon = 1e-10
-        );
+            let r0 = 2.0;
+            assert_relative_eq!(
+                custom.isotropic_twobody_energy(r0 * r0),
+                0.0,
+                epsilon = 1e-10
+            );
+        }
+
+        // exmex's symbolic differentiation of `(1 - exp(...))^2` produces a deeply
+        // nested expression tree that overflows the default stack in debug builds.
+        #[cfg(debug_assertions)]
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(inner)
+            .unwrap()
+            .join()
+            .unwrap();
+
+        #[cfg(not(debug_assertions))]
+        inner();
     }
 
     #[test]
