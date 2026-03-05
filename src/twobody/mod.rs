@@ -109,15 +109,25 @@ pub trait IsotropicTwobodyEnergy: AnisotropicTwobodyEnergy + DynClone + Debug + 
 
 dyn_clone::clone_trait_object!(IsotropicTwobodyEnergy);
 
+/// Calculate the squared norm of a Vector3.
+fn norm_squared(v: &Vector3) -> f64 {
+    v.x * v.x + v.y * v.y + v.z * v.z
+}
+
 /// All isotropic potentials implement the anisotropic trait.
 impl<T: IsotropicTwobodyEnergy> AnisotropicTwobodyEnergy for T {
     fn anisotropic_twobody_energy(&self, orientation: &RelativeOrientation) -> f64 {
-        self.isotropic_twobody_energy(orientation.distance.norm_squared())
+        self.isotropic_twobody_energy(norm_squared(&orientation.distance))
     }
     fn anisotropic_twobody_force(&self, orientation: &RelativeOrientation) -> Vector3 {
-        let r_squared = orientation.distance.norm_squared();
-        let r_hat = orientation.distance / r_squared.sqrt();
-        self.isotropic_twobody_force(r_squared) * r_hat
+        let r_squared = norm_squared(&orientation.distance);
+        let inv_r = 1.0 / r_squared.sqrt();
+        let f = self.isotropic_twobody_force(r_squared) * inv_r;
+        Vector3 {
+            x: f * orientation.distance.x,
+            y: f * orientation.distance.y,
+            z: f * orientation.distance.z,
+        }
     }
 }
 
@@ -267,8 +277,8 @@ fn test_combined() {
     let r2 = 0.5;
 
     let relative_orientation = RelativeOrientation {
-        distance: Vector3::new(f64::sqrt(r2), 0.0, 0.0),
-        orientation: Vector3::new(0.0, 1.0, 0.0),
+        distance: [f64::sqrt(r2), 0.0, 0.0].into(),
+        orientation: [0.0, 1.0, 0.0].into(),
     };
 
     let pot1 = LennardJones::new(0.5, 1.0);
@@ -373,8 +383,8 @@ fn test_arc_potential() {
 
     // Verify it works with anisotropic interface
     let orientation = RelativeOrientation {
-        distance: Vector3::new(1.5, 0.0, 0.0),
-        orientation: Vector3::new(0.0, 1.0, 0.0),
+        distance: [1.5, 0.0, 0.0].into(),
+        orientation: [0.0, 1.0, 0.0].into(),
     };
     assert_relative_eq!(
         arc_pot.anisotropic_twobody_energy(&orientation),

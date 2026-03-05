@@ -17,7 +17,7 @@
 //! This module provides tools for calculating the two-body interaction energy between
 //! electric multipole moments, such as monopoles, dipoles, quadrupoles etc.
 
-use crate::{twobody::IsotropicTwobodyEnergy, Cutoff, Vector3};
+use crate::{twobody::IsotropicTwobodyEnergy, Cutoff};
 use coulomb::{
     pairwise::MultipoleEnergy,
     permittivity::{ConstantPermittivity, RelativePermittivity},
@@ -50,7 +50,7 @@ impl<T: MultipoleEnergy> coulomb::DebyeLength for IonIon<T> {
     fn kappa(&self) -> Option<f64> {
         self.scheme.kappa()
     }
-    fn set_debye_length(&mut self, debye_length: Option<f64>) -> anyhow::Result<()> {
+    fn set_debye_length(&mut self, debye_length: Option<f64>) -> Result<(), coulomb::Error> {
         self.scheme.set_debye_length(debye_length)
     }
     fn debye_length(&self) -> Option<f64> {
@@ -59,10 +59,10 @@ impl<T: MultipoleEnergy> coulomb::DebyeLength for IonIon<T> {
 }
 
 impl<T: MultipoleEnergy> RelativePermittivity for IonIon<T> {
-    fn permittivity(&self, _temperature: f64) -> anyhow::Result<f64> {
+    fn permittivity(&self, _temperature: f64) -> Result<f64, coulomb::Error> {
         Ok(f64::from(self.permittivity))
     }
-    fn set_permittivity(&mut self, permittivity: f64) -> anyhow::Result<()> {
+    fn set_permittivity(&mut self, permittivity: f64) -> Result<(), coulomb::Error> {
         self.permittivity = ConstantPermittivity::new(permittivity);
         Ok(())
     }
@@ -139,13 +139,14 @@ impl<T: MultipoleEnergy + Debug + Clone + PartialEq + Send + Sync> IsotropicTwob
         let scheme = &self.ionion.scheme;
         let ion_ion = scheme.ion_ion_energy(self.ionion.charge_product, 1.0, r);
 
-        let r = Vector3::new(r, 0.0, 0.0);
+        let rv = [r, 0.0, 0.0];
+        let neg_rv = [-r, 0.0, 0.0];
         // These terms are always <= 0
         // TODO: This could be optimized by calling `ion_induced_dipole_energy` only once
         // with e.g. alpha=1 and charge=`q1*a0 + q0*a1`.
         let ion_induced_dipole =
-            scheme.ion_induced_dipole_energy(self.charges.0, self.polarizabilities.1, &r)
-                + scheme.ion_induced_dipole_energy(self.charges.1, self.polarizabilities.0, &-r);
+            scheme.ion_induced_dipole_energy(self.charges.0, self.polarizabilities.1, rv)
+                + scheme.ion_induced_dipole_energy(self.charges.1, self.polarizabilities.0, neg_rv);
 
         let to_kjmol = coulomb::TO_CHEMISTRY_UNIT / f64::from(self.ionion.permittivity);
         to_kjmol * (ion_ion + ion_induced_dipole)
