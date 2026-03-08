@@ -94,11 +94,11 @@ pub trait IsotropicTwobodyEnergy: AnisotropicTwobodyEnergy + DynClone + Debug + 
     /// Interaction energy between a pair of isotropic particles.
     fn isotropic_twobody_energy(&self, distance_squared: f64) -> f64;
 
-    /// Force magnitude due to an isotropic interaction potential, 𝐹(𝑟) = -∇𝑈(𝑟)
+    /// Negative derivative of the potential with respect to squared distance, −∂𝑈/∂(𝑟²).
     ///
-    /// The default implementation uses a central difference to calculate the force
-    /// and should be overridden with the exact analytical expression for better speed
-    /// and accuracy.
+    /// Related to the force magnitude by 𝐹(𝑟) = −d𝑈/d𝑟 = 2𝑟 · (−d𝑈/d(𝑟²)).
+    /// The default implementation uses a central difference and should be overridden
+    /// with the exact analytical expression for better speed and accuracy.
     fn isotropic_twobody_force(&self, distance_squared: f64) -> f64 {
         const EPS: f64 = 1e-6;
         let delta_u = self.isotropic_twobody_energy(distance_squared + EPS)

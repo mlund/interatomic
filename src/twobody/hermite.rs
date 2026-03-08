@@ -584,17 +584,9 @@ impl<'a> IntervalData<'a> {
     fn coeffs_uniform_rsq(&self) -> ([f64; 4], [f64; 4]) {
         let delta = self.rsq[self.i + 1] - self.rsq[self.i];
 
-        // dU/d(rsq) = -F(r) / (2r)  via chain rule
-        let du_i = if self.r_i > 1e-10 {
-            -self.f_i / (2.0 * self.r_i)
-        } else {
-            0.0
-        };
-        let du_i1 = if self.r_i1 > 1e-10 {
-            -self.f_i1 / (2.0 * self.r_i1)
-        } else {
-            0.0
-        };
+        // F = -dU/d(r²), so dU/d(r²) = -F (grid coordinate IS r²)
+        let du_i = -self.f_i;
+        let du_i1 = -self.f_i1;
 
         let df_i = self.df_prev(self.rsq[self.i + 1], delta, |j| self.rsq[j]);
         let df_i1 = self.df_next(self.rsq[self.i], self.rsq[self.i + 1], |j| self.rsq[j]);
@@ -609,9 +601,9 @@ impl<'a> IntervalData<'a> {
     fn coeffs_uniform_r(&self) -> ([f64; 4], [f64; 4]) {
         let delta = self.r_i1 - self.r_i;
 
-        // dU/dr = -F
-        let du_i = -self.f_i;
-        let du_i1 = -self.f_i1;
+        // F = -dU/d(r²); dU/dr = dU/d(r²) · 2r = -F · 2r
+        let du_i = -2.0 * self.r_i * self.f_i;
+        let du_i1 = -2.0 * self.r_i1 * self.f_i1;
 
         let df_i = self.df_prev(self.r_i1, delta, |j| self.rsq[j].sqrt());
         let df_i1 = self.df_next(self.r_i, self.r_i1, |j| self.rsq[j].sqrt());
@@ -639,9 +631,9 @@ impl<'a> IntervalData<'a> {
             }
         };
 
-        // dU/dx = -F * dr/dx
-        let du_i = -self.f_i * drdx(x_i);
-        let du_i1 = -self.f_i1 * drdx(x_i1);
+        // F = -dU/d(r²); dU/dx = dU/dr · dr/dx = (-2rF) · dr/dx
+        let du_i = -2.0 * self.r_i * self.f_i * drdx(x_i);
+        let du_i1 = -2.0 * self.r_i1 * self.f_i1 * drdx(x_i1);
 
         let df_i = self.df_prev(x_i1, delta, |j| j as f64 * delta);
         let df_i1 = self.df_next(x_i, x_i1, |j| j as f64 * delta);
@@ -658,9 +650,9 @@ impl<'a> IntervalData<'a> {
         let w_i1 = 1.0 / self.rsq[self.i + 1];
         let delta = w_i1 - w_i;
 
-        // dU/dw = F * r³ / 2  via chain rule
-        let du_i = self.f_i * self.r_i.powi(3) / 2.0;
-        let du_i1 = self.f_i1 * self.r_i1.powi(3) / 2.0;
+        // F = -dU/d(r²); dU/dw = dU/d(r²) · d(r²)/dw = (-F)·(-r⁴) = F·r⁴
+        let du_i = self.f_i * self.r_i.powi(4);
+        let du_i1 = self.f_i1 * self.r_i1.powi(4);
 
         let df_i = self.df_prev(w_i1, delta, |j| 1.0 / self.rsq[j]);
         let df_i1 = self.df_next(w_i, w_i1, |j| 1.0 / self.rsq[j]);
@@ -2444,13 +2436,10 @@ mod tests {
         }
     }
 
-    /// Test that UniformR grid produces sign reversals (regression test).
-    ///
-    /// This documents the known issue with UniformR at short range and ensures
-    /// the default PowerLaw grid is used to avoid it.
+    /// Verify UniformR grid no longer produces sign reversals after fixing
+    /// Hermite tangent slopes (correct chain rule for -dU/d(r²) convention).
     #[test]
-    fn test_uniform_r_has_sign_reversal() {
-        // Use AH+Yukawa with large cutoff - this is where UniformR fails
+    fn test_uniform_r_no_sign_reversal() {
         let lj = LennardJones::new(0.8, 3.0);
         let ah = AshbaughHatch::new(lj, 0.5, 100.0);
         let yukawa = IonIon::new(
@@ -2469,8 +2458,6 @@ mod tests {
                 .with_grid_type(GridType::UniformR),
         );
 
-        // Count negative values where exact is positive
-        let mut sign_reversals = 0;
         for i in 0..9000 {
             let r = 0.1 + (i as f64) * 0.0001;
             let rsq = r * r;
@@ -2481,17 +2468,11 @@ mod tests {
             let u_exact = combined.isotropic_twobody_energy(rsq);
             let u_spline = splined.isotropic_twobody_energy(rsq);
 
-            if u_exact > 0.0 && u_spline < 0.0 {
-                sign_reversals += 1;
-            }
+            assert!(
+                !(u_exact > 0.0 && u_spline < 0.0),
+                "Sign reversal at r={r:.4}: exact={u_exact:.3e}, spline={u_spline:.3e}"
+            );
         }
-
-        // UniformR should have sign reversals (this is why PowerLaw is the default)
-        assert!(
-            sign_reversals > 0,
-            "Expected UniformR to have sign reversals at short range, found none. \
-             If this test fails, UniformR may have been fixed and this test can be updated."
-        );
     }
 
     /// Test that default GridType is PowerLaw2.
