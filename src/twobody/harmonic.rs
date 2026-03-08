@@ -54,6 +54,16 @@ impl Harmonic {
             spring_constant,
         }
     }
+
+    /// Equilibrium distance.
+    pub const fn eq_distance(&self) -> f64 {
+        self.eq_distance
+    }
+
+    /// Spring constant.
+    pub const fn spring_constant(&self) -> f64 {
+        self.spring_constant
+    }
 }
 
 impl IsotropicTwobodyEnergy for Harmonic {

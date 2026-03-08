@@ -40,6 +40,16 @@ impl HarmonicTorsion {
             spring_constant,
         }
     }
+
+    /// Equilibrium angle in degrees.
+    pub const fn eq_angle(&self) -> f64 {
+        self.eq_angle
+    }
+
+    /// Spring constant.
+    pub const fn spring_constant(&self) -> f64 {
+        self.spring_constant
+    }
 }
 
 impl ThreebodyAngleEnergy for HarmonicTorsion {

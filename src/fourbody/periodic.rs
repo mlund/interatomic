@@ -43,6 +43,21 @@ impl PeriodicDihedral {
             periodicity,
         }
     }
+
+    /// Phase angle in degrees.
+    pub const fn phase_angle(&self) -> f64 {
+        self.phase_angle
+    }
+
+    /// Spring constant.
+    pub const fn spring_constant(&self) -> f64 {
+        self.spring_constant
+    }
+
+    /// Periodicity (number of minima per full rotation).
+    pub const fn periodicity(&self) -> f64 {
+        self.periodicity
+    }
 }
 
 impl FourbodyAngleEnergy for PeriodicDihedral {
