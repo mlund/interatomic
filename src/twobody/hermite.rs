@@ -830,9 +830,10 @@ impl IsotropicTwobodyEnergy for SplinedPotential {
             let eps = t - i as f64;
             let c = &self.coeffs[i];
             let u = eps.mul_add(eps.mul_add(eps.mul_add(c.u[3], c.u[2]), c.u[1]), c.u[0]);
-            // Rare: linear extrapolation below r_min (only case needing sqrt)
+            // Rare: linear extrapolation below r_min (only case needing sqrt).
+            // Slope = -dU/dr|_{r_min} = 2*r_min*f_at_rmin since f_at_rmin = -dU/d(r²)
             return if distance_squared < rsq_min {
-                u + self.f_at_rmin * (self.r_min - distance_squared.sqrt())
+                u + 2.0 * self.r_min * self.f_at_rmin * (self.r_min - distance_squared.sqrt())
             } else {
                 u
             };
@@ -843,19 +844,22 @@ impl IsotropicTwobodyEnergy for SplinedPotential {
         let (i, eps) = self.compute_index_eps(r);
         let c = &self.coeffs[i];
         let u_spline = eps.mul_add(eps.mul_add(eps.mul_add(c.u[3], c.u[2]), c.u[1]), c.u[0]);
-        self.f_at_rmin.mul_add(extrap_dist, u_spline)
+        // Slope = -dU/dr|_{r_min} = 2*r_min*f_at_rmin since f_at_rmin = -dU/d(r²)
+        (2.0 * self.r_min * self.f_at_rmin).mul_add(extrap_dist, u_spline)
     }
 
     /// Evaluate force at squared distance using cubic spline interpolation.
     ///
-    /// Returns 0.0 if rsq >= cutoff². For rsq < rsq_min, returns F(r_min)
-    /// (constant force corresponding to linear energy extrapolation).
+    /// Returns 0.0 if rsq >= cutoff². Below r_min, scales as `f(r_min) * r_min / r`
+    /// to stay consistent with the linear energy extrapolation in real-force space.
     #[inline(always)]
     fn isotropic_twobody_force(&self, distance_squared: f64) -> f64 {
         let rsq_max = self.r_max * self.r_max;
         if distance_squared >= rsq_max {
             return 0.0;
         }
+
+        let r = distance_squared.sqrt();
 
         if let GridType::UniformRsq = self.grid_type {
             let rsq_min = self.r_min * self.r_min;
@@ -864,13 +868,24 @@ impl IsotropicTwobodyEnergy for SplinedPotential {
             let i = (t as usize).min(self.n - 2);
             let eps = t - i as f64;
             let c = &self.coeffs[i];
-            return eps.mul_add(eps.mul_add(eps.mul_add(c.f[3], c.f[2]), c.f[1]), c.f[0]);
+            let f = eps.mul_add(eps.mul_add(eps.mul_add(c.f[3], c.f[2]), c.f[1]), c.f[0]);
+            // Below r_min, -dU/d(r²) = f_at_rmin * r_min / r to match constant -dU/dr
+            return if distance_squared < rsq_min {
+                f * self.r_min / r
+            } else {
+                f
+            };
         }
 
-        let r = distance_squared.sqrt();
         let (i, eps) = self.compute_index_eps(r);
         let c = &self.coeffs[i];
-        eps.mul_add(eps.mul_add(eps.mul_add(c.f[3], c.f[2]), c.f[1]), c.f[0])
+        let f = eps.mul_add(eps.mul_add(eps.mul_add(c.f[3], c.f[2]), c.f[1]), c.f[0]);
+        // Below r_min, -dU/d(r²) = f_at_rmin * r_min / r to match constant -dU/dr
+        if r < self.r_min {
+            f * self.r_min / r
+        } else {
+            f
+        }
     }
 }
 
@@ -1169,12 +1184,12 @@ impl SplineTableSimd {
         let extrap_dist = (self.r_min - r).max(0.0);
         let (i, eps) = self.compute_index_eps(r);
 
-        // Horner's method + linear extrapolation
+        // Horner's method + linear extrapolation with slope = 2*r_min*f_at_rmin
         let u_spline = eps.mul_add(
             eps.mul_add(eps.mul_add(self.u3[i], self.u2[i]), self.u1[i]),
             self.u0[i],
         );
-        self.f_at_rmin.mul_add(extrap_dist, u_spline)
+        (2.0 * self.r_min * self.f_at_rmin).mul_add(extrap_dist, u_spline)
     }
 
     /// Evaluate energies for 4 distances using SIMD (f64x4).
@@ -1289,9 +1304,9 @@ impl SplineTableSimd {
         let u_spline = u_spline.mul_add(eps, c1);
         let u_spline = u_spline.mul_add(eps, c0);
 
-        // Add linear extrapolation for r < r_min
-        let f_at_rmin_v = f64x4::splat(self.f_at_rmin);
-        let result = f_at_rmin_v.mul_add(extrap_dist, u_spline);
+        // Add linear extrapolation for r < r_min (slope = 2*r_min*f_at_rmin)
+        let slope_v = f64x4::splat(2.0 * self.r_min * self.f_at_rmin);
+        let result = slope_v.mul_add(extrap_dist, u_spline);
 
         // Zero out values beyond cutoff
         let mask = rsq.simd_lt(rsq_max);
@@ -1493,7 +1508,7 @@ impl SplineTableSimdF32 {
 
         let c = &self.coeffs[i];
         let u_spline = eps.mul_add(eps.mul_add(eps.mul_add(c[3], c[2]), c[1]), c[0]);
-        self.f_at_rmin.mul_add(extrap_dist, u_spline)
+        (2.0 * self.r_min * self.f_at_rmin).mul_add(extrap_dist, u_spline)
     }
 
     /// Evaluate energies for 4 distances using f32x4 SIMD.
@@ -1609,8 +1624,8 @@ impl SplineTableSimdF32 {
         let u_spline = u_spline.mul_add(eps, c1);
         let u_spline = u_spline.mul_add(eps, c0);
 
-        let f_at_rmin_v = f32x4::splat(self.f_at_rmin);
-        let result = f_at_rmin_v.mul_add(extrap_dist, u_spline);
+        let slope_v = f32x4::splat(2.0 * self.r_min * self.f_at_rmin);
+        let result = slope_v.mul_add(extrap_dist, u_spline);
 
         let mask = rsq.simd_lt(rsq_max);
         result & mask.blend(f32x4::splat(f32::from_bits(!0u32)), f32x4::ZERO)
@@ -1721,8 +1736,8 @@ impl SplineTableSimdF32 {
         let u_spline = u_spline.mul_add(eps, c1);
         let u_spline = u_spline.mul_add(eps, c0);
 
-        let f_at_rmin_v = SimdF32::splat(self.f_at_rmin);
-        let result = f_at_rmin_v.mul_add(extrap_dist, u_spline);
+        let slope_v = SimdF32::splat(2.0 * self.r_min * self.f_at_rmin);
+        let result = slope_v.mul_add(extrap_dist, u_spline);
 
         let mask = rsq.simd_lt(rsq_max);
         result & mask.blend(SimdF32::splat(f32::from_bits(!0u32)), SimdF32::ZERO)
@@ -3024,9 +3039,10 @@ mod tests {
             let r = rsq.sqrt();
             let r_min = rsq_min.sqrt();
 
-            // Expected: U(r) = U(r_min) + F(r_min) * (r_min - r)
+            // Expected: U(r) = U(r_min) + 2*r_min*f_at_rmin * (r_min - r)
+            // since f_at_rmin = -dU/d(r²) and -dU/dr = 2*r_min*f_at_rmin
             let delta_r = r_min - r;
-            let u_expected = u_at_rmin + f_at_rmin * delta_r;
+            let u_expected = u_at_rmin + 2.0 * r_min * f_at_rmin * delta_r;
             let u_spline = splined.isotropic_twobody_energy(rsq);
 
             let diff = (u_spline - u_expected).abs();
@@ -3055,9 +3071,10 @@ mod tests {
         }
     }
 
-    /// Test that force is constant (F(r_min)) below r_min.
+    /// Test that -dU/d(r²) scales as f_at_rmin * r_min / r below r_min,
+    /// consistent with constant real force -dU/dr.
     #[test]
-    fn test_force_constant_below_rmin() {
+    fn test_force_scaling_below_rmin() {
         let lj = LennardJones::new(1.0, 1.0);
         let cutoff = 2.5;
         let rsq_min = 0.64; // r_min = 0.8σ
@@ -3068,19 +3085,20 @@ mod tests {
             SplineConfig::default().with_rsq_min(rsq_min),
         );
 
+        let r_min = rsq_min.sqrt();
         let f_at_rmin = splined.isotropic_twobody_force(rsq_min);
 
-        // Force should be constant (equal to F(r_min)) for all r < r_min
+        // -dU/d(r²) should scale as f_at_rmin * r_min / r below r_min
         let test_rsq: [f64; 4] = [0.49, 0.36, 0.25, 0.16];
         for &rsq in &test_rsq {
+            let r = rsq.sqrt();
             let f = splined.isotropic_twobody_force(rsq);
-            let diff = (f - f_at_rmin).abs();
+            let f_expected = f_at_rmin * r_min / r;
+            let diff = (f - f_expected).abs();
             assert!(
                 diff < 1e-10,
-                "Force should be constant below r_min: F({}) = {}, F(r_min) = {}",
-                rsq.sqrt(),
-                f,
-                f_at_rmin
+                "Force scaling below r_min: F({}) = {}, expected {}",
+                r, f, f_expected
             );
         }
     }
@@ -3211,10 +3229,10 @@ mod tests {
             "InverseRsq: Energy should increase below r_min"
         );
 
-        // Verify linear relationship
+        // Verify linear relationship: slope = 2*r_min*f_at_rmin
         let r = rsq_below.sqrt();
         let r_min = rsq_min.sqrt();
-        let expected = u_at_rmin + splined.f_at_rmin * (r_min - r);
+        let expected = u_at_rmin + 2.0 * r_min * splined.f_at_rmin * (r_min - r);
         let diff = (u_below - expected).abs();
         assert!(
             diff < 1e-10,
