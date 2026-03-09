@@ -28,7 +28,7 @@ itertools = "0.10"
 nalgebra = { version = "0.34", features = ["serde-serialize"] }
 num = "0.4"
 physical_constants = "0.5"
-coulomb = { version = "0.3", features = ["serde"] }
+coulomb = { git = "https://github.com/mlund/coulomb", features = ["serde"] }
 dyn-clone = "1.0"
 bytemuck = { version = "1", features = ["derive"], optional = true }
 wide = { version = "1.1", optional = true }
