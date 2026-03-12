@@ -1800,10 +1800,6 @@ impl SplineTableSimdF32 {
     }
 
     /// Fast SIMD energy evaluation optimized for PowerLaw2 grid.
-    ///
-    /// This method skips extrapolation below r_min and is optimized for the
-    /// common case where the grid type is PowerLaw2. Panics if grid_type is
-    /// not PowerLaw2.
     #[inline]
     pub fn energy_simd_powerlaw2(&self, rsq: SimdF32) -> SimdF32 {
         debug_assert!(
@@ -1826,6 +1822,8 @@ impl SplineTableSimdF32 {
         let n_minus_1 = SimdF32::splat((self.n - 1) as f32);
 
         let r = rsq.sqrt();
+        // Linear extrapolation distance below r_min (zero if r >= r_min)
+        let extrap_dist = (r_min_v - r).max(zero);
         let r_clamped = r.max(r_min_v).min(r_max_v);
 
         // PowerLaw2 grid: t = sqrt((r - r_min) / r_range) * (n - 1)
@@ -1841,19 +1839,20 @@ impl SplineTableSimdF32 {
             let i = (t_arr[lane] as usize).min(max_idx);
             let eps = t_arr[lane] - i as f32;
             let c = &self.coeffs[i];
-            // Horner's method: c0 + eps*(c1 + eps*(c2 + eps*c3))
             energies[lane] = c[0] + eps * (c[1] + eps * (c[2] + eps * c[3]));
         }
 
-        // Apply cutoff mask
-        cutoff_mask.blend(simd_f32_from_array(energies), zero)
+        // Apply extrapolation below r_min: U(r) ≈ U(r_min) + 2·r_min·f_at_rmin·(r_min - r)
+        let u_spline = simd_f32_from_array(energies);
+        let slope_v = SimdF32::splat(2.0 * self.r_min * self.f_at_rmin);
+        let result = slope_v.mul_add(extrap_dist, u_spline);
+
+        cutoff_mask.blend(result, zero)
     }
 
     /// Fast SIMD energy evaluation optimized for InverseRsq grid.
     ///
-    /// This method is optimized for InverseRsq grid type which avoids sqrt
-    /// entirely by using w = 1/rsq as the grid variable. This can be faster
-    /// than PowerLaw2 for short-range potentials.
+    /// Uses w = 1/rsq as grid variable — avoids sqrt entirely.
     #[inline]
     pub fn energy_simd_inversersq(&self, rsq: SimdF32) -> SimdF32 {
         debug_assert!(
@@ -1878,7 +1877,12 @@ impl SplineTableSimdF32 {
         let inv_delta = SimdF32::splat(self.inv_delta);
         let one = SimdF32::splat(1.0);
 
-        // InverseRsq grid: no sqrt needed!
+        // Linear extrapolation below r_min (needs sqrt only for below-rmin particles)
+        let r = rsq.sqrt();
+        let r_min_v = SimdF32::splat(self.r_min);
+        let extrap_dist = (r_min_v - r).max(zero);
+
+        // InverseRsq grid: no sqrt needed for index!
         let rsq_clamped = rsq.max(rsq_min_v).min(rsq_max_v);
         let w = one / rsq_clamped;
         let t = (w - w_min) * inv_delta;
@@ -1892,12 +1896,15 @@ impl SplineTableSimdF32 {
             let i = (t_arr[lane] as usize).min(max_idx);
             let eps = t_arr[lane] - i as f32;
             let c = &self.coeffs[i];
-            // Horner's method: c0 + eps*(c1 + eps*(c2 + eps*c3))
             energies[lane] = c[0] + eps * (c[1] + eps * (c[2] + eps * c[3]));
         }
 
-        // Apply cutoff mask
-        cutoff_mask.blend(simd_f32_from_array(energies), zero)
+        // Apply extrapolation below r_min: U(r) ≈ U(r_min) + 2·r_min·f_at_rmin·(r_min - r)
+        let u_spline = simd_f32_from_array(energies);
+        let slope_v = SimdF32::splat(2.0 * self.r_min * self.f_at_rmin);
+        let result = slope_v.mul_add(extrap_dist, u_spline);
+
+        cutoff_mask.blend(result, zero)
     }
 
     /// Sum energies for a batch using architecture-optimal SIMD.
