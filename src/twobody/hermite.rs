@@ -151,6 +151,27 @@ pub enum GridType {
     InverseRsq,
 }
 
+/// Policy for auto-trimming spline grid boundaries based on potential shape.
+///
+/// GPU and SIMD (f32) spline evaluations lose accuracy for potentials with small σ values
+/// when the spline grid spans a huge `r_max / r_min` ratio, producing large-magnitude
+/// coefficients near the repulsive wall. Trimming raises `r_min` to reduce dynamic range.
+#[derive(Clone, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+pub enum GridTrim {
+    /// No trimming. Use r_min/r_max as-is (default).
+    #[default]
+    NoTrim,
+    /// For potentials with steep repulsion at short range that decay to zero at long range
+    /// (e.g. Lennard-Jones, Mie, Ashbaugh-Hatch + Coulomb).
+    ///
+    /// Raises `r_min` until `|U(r_min)| ≤ energy_cap` (in energy units, e.g. kJ/mol).
+    RepulsiveDecay {
+        /// Maximum allowed `|U(r_min)|` (energy units).
+        energy_cap: f64,
+    },
+}
+
 /// Configuration for spline table construction
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
@@ -168,6 +189,8 @@ pub struct SplineConfig {
     pub shift_force: bool,
     /// Grid spacing strategy (default: PowerLaw(2.0))
     pub grid_type: GridType,
+    /// Policy for auto-trimming grid boundaries (default: no trimming)
+    pub grid_trim: GridTrim,
 }
 
 impl Default for SplineConfig {
@@ -179,6 +202,7 @@ impl Default for SplineConfig {
             shift_energy: true,
             shift_force: false,
             grid_type: GridType::default(),
+            grid_trim: GridTrim::NoTrim,
         }
     }
 }
@@ -215,6 +239,12 @@ impl SplineConfig {
     /// Set grid type (UniformR recommended for steep potentials)
     pub const fn with_grid_type(mut self, grid_type: GridType) -> Self {
         self.grid_type = grid_type;
+        self
+    }
+
+    /// Set grid trim policy for auto-adjusting grid boundaries
+    pub const fn with_grid_trim(mut self, trim: GridTrim) -> Self {
+        self.grid_trim = trim;
         self
     }
 }
@@ -353,6 +383,32 @@ impl SplinedPotential {
         // Use lower_cutoff from potential if rsq_min not explicitly set
         let lower = potential.lower_cutoff();
         let rsq_min = config.rsq_min.unwrap_or(lower * lower).max(1e-10); // Avoid zero/negative values
+
+        // Raise rsq_min so that large-magnitude coefficients near the repulsive wall
+        // don't lose precision when cast to f32 on GPU/SIMD paths.
+        let rsq_min = match config.grid_trim {
+            GridTrim::NoTrim => rsq_min,
+            GridTrim::RepulsiveDecay { energy_cap } => {
+                let u_at_min = potential.isotropic_twobody_energy(rsq_min).abs();
+                if u_at_min > energy_cap {
+                    // Bisect in r-space (not r²) for uniform convergence rate
+                    let r_lo = rsq_min.sqrt();
+                    let r_hi = rsq_max.sqrt();
+                    let new_r = find_r_at_energy(potential, energy_cap, r_lo, r_hi);
+                    let new_rsq = new_r * new_r;
+                    // If |U| > energy_cap everywhere, the bisection converges to r_hi
+                    // and new_rsq ≈ rsq_max — catch this degenerate case with tolerance.
+                    assert!(
+                        new_rsq < rsq_max * (1.0 - 1e-6),
+                        "GridTrim::RepulsiveDecay: energy_cap ({energy_cap}) is too low; \
+                         |U| exceeds it across the entire grid range"
+                    );
+                    new_rsq
+                } else {
+                    rsq_min
+                }
+            }
+        };
 
         assert!(rsq_min < rsq_max, "rsq_min must be less than rsq_max");
 
@@ -1889,6 +1945,35 @@ impl Debug for SplineTableSimdF32 {
 }
 
 // ============================================================================
+// Grid trim helpers
+// ============================================================================
+
+/// Binary search for `r` where `|U(r²)| ≈ threshold`.
+///
+/// Assumes `|U|` is monotonically decreasing from `r_lo` to `r_hi`.
+/// Returns the `r` value closest to where `|U(r²)| = threshold`.
+fn find_r_at_energy<P: IsotropicTwobodyEnergy>(
+    potential: &P,
+    threshold: f64,
+    r_lo: f64,
+    r_hi: f64,
+) -> f64 {
+    let mut lo = r_lo;
+    let mut hi = r_hi;
+    // 50 iterations gives 2^-50 ≈ 1e-15 relative precision, sufficient for f64
+    for _ in 0..50 {
+        let mid = 0.5 * (lo + hi);
+        let u = potential.isotropic_twobody_energy(mid * mid).abs();
+        if u > threshold {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -3098,7 +3183,9 @@ mod tests {
             assert!(
                 diff < 1e-10,
                 "Force scaling below r_min: F({}) = {}, expected {}",
-                r, f, f_expected
+                r,
+                f,
+                f_expected
             );
         }
     }
@@ -3240,5 +3327,225 @@ mod tests {
             u_below,
             expected
         );
+    }
+
+    // ====================================================================
+    // GridTrim tests
+    // ====================================================================
+
+    #[test]
+    fn test_grid_trim_default_is_none() {
+        assert!(matches!(
+            SplineConfig::default().grid_trim,
+            GridTrim::NoTrim
+        ));
+    }
+
+    #[test]
+    fn test_energy_cap_raises_rmin() {
+        let lj = LennardJones::new(1.0, 1.0);
+        let cutoff = 2.5;
+        let energy_cap = 1000.0;
+        let config =
+            SplineConfig::default().with_grid_trim(GridTrim::RepulsiveDecay { energy_cap });
+        let splined = SplinedPotential::with_cutoff(&lj, cutoff, config);
+
+        // Default lower_cutoff for LJ σ=1 is 0.6, so r_min should be raised above that
+        assert!(
+            splined.r_min > 0.6,
+            "r_min should be raised above default lower_cutoff, got {}",
+            splined.r_min
+        );
+        // |U(r_min²)| should be approximately energy_cap
+        let u_at_rmin = lj
+            .isotropic_twobody_energy(splined.r_min * splined.r_min)
+            .abs();
+        assert!(
+            u_at_rmin <= energy_cap * 1.01,
+            "|U(r_min²)| = {} should be ≤ energy_cap = {}",
+            u_at_rmin,
+            energy_cap
+        );
+    }
+
+    #[test]
+    fn test_energy_cap_no_adjustment_when_unnecessary() {
+        let lj = LennardJones::new(1.0, 1.0);
+        let cutoff = 2.5;
+        let rsq_min = 0.81; // r = 0.9, modest energy
+        let energy_cap = 1e10;
+        let config = SplineConfig::default()
+            .with_rsq_min(rsq_min)
+            .with_grid_trim(GridTrim::RepulsiveDecay { energy_cap });
+        let splined = SplinedPotential::with_cutoff(&lj, cutoff, config);
+
+        let actual_rmin = splined.r_min;
+        assert!(
+            (actual_rmin - 0.9).abs() < 1e-6,
+            "r_min should remain ≈ 0.9 when energy is below cap, got {}",
+            actual_rmin
+        );
+    }
+
+    #[test]
+    fn test_energy_cap_preserves_accuracy() {
+        let lj = LennardJones::new(1.0, 1.0);
+        let cutoff = 2.5;
+
+        let without_trim = SplinedPotential::with_cutoff(&lj, cutoff, SplineConfig::default());
+        let with_trim = SplinedPotential::with_cutoff(
+            &lj,
+            cutoff,
+            SplineConfig::default().with_grid_trim(GridTrim::RepulsiveDecay { energy_cap: 1000.0 }),
+        );
+
+        // Compare accuracy in the tail region (r > 1.5σ) — should be comparable or better
+        let mut max_err_without = 0.0_f64;
+        let mut max_err_with = 0.0_f64;
+        for i in 0..100 {
+            let r = 1.5 + i as f64 * 0.01;
+            let rsq = r * r;
+            let exact = lj.isotropic_twobody_energy(rsq) - without_trim.energy_shift;
+            let err_without = (without_trim.isotropic_twobody_energy(rsq) - exact).abs();
+            let exact_trimmed = lj.isotropic_twobody_energy(rsq) - with_trim.energy_shift;
+            let err_with = (with_trim.isotropic_twobody_energy(rsq) - exact_trimmed).abs();
+            max_err_without = max_err_without.max(err_without);
+            max_err_with = max_err_with.max(err_with);
+        }
+        // Trimmed version should not be significantly worse
+        assert!(
+            max_err_with < max_err_without * 10.0 + 1e-10,
+            "Trimmed accuracy ({:e}) much worse than untrimmed ({:e})",
+            max_err_with,
+            max_err_without
+        );
+    }
+
+    #[test]
+    fn test_energy_cap_extrapolation_below_new_rmin() {
+        let lj = LennardJones::new(1.0, 1.0);
+        let cutoff = 2.5;
+        let config =
+            SplineConfig::default().with_grid_trim(GridTrim::RepulsiveDecay { energy_cap: 100.0 });
+        let splined = SplinedPotential::with_cutoff(&lj, cutoff, config);
+
+        let rsq_min = splined.r_min * splined.r_min;
+
+        // Below r_min: linear extrapolation should give monotonically increasing energy
+        let u_at_rmin = splined.isotropic_twobody_energy(rsq_min);
+        let u_below1 = splined.isotropic_twobody_energy(rsq_min * 0.9);
+        let u_below2 = splined.isotropic_twobody_energy(rsq_min * 0.8);
+        assert!(
+            u_below1 > u_at_rmin,
+            "Energy should increase below r_min: u(0.9*rsq_min)={} vs u(rsq_min)={}",
+            u_below1,
+            u_at_rmin
+        );
+        assert!(
+            u_below2 > u_below1,
+            "Energy should keep increasing: u(0.8*rsq_min)={} vs u(0.9*rsq_min)={}",
+            u_below2,
+            u_below1
+        );
+
+        // Above r_max: returns 0
+        let u_above = splined.isotropic_twobody_energy(cutoff * cutoff + 0.1);
+        assert!(
+            u_above.abs() < 1e-15,
+            "Energy above cutoff should be 0, got {}",
+            u_above
+        );
+    }
+
+    #[test]
+    fn test_energy_cap_small_sigma_wide_range() {
+        let lj = LennardJones::new(1.0, 0.5); // ε=1, σ=0.5
+        let cutoff = 10.0;
+        let energy_cap = 100.0; // |U| at default r_min ≈ 1750, well above cap
+
+        // Without trim
+        let splined_no_trim = SplinedPotential::with_cutoff(&lj, cutoff, SplineConfig::default());
+        // With trim
+        let config =
+            SplineConfig::default().with_grid_trim(GridTrim::RepulsiveDecay { energy_cap });
+        let splined_trimmed = SplinedPotential::with_cutoff(&lj, cutoff, config);
+
+        // r_min should be raised significantly from the default
+        assert!(
+            splined_trimmed.r_min > splined_no_trim.r_min,
+            "Trimmed r_min ({}) should be > untrimmed r_min ({})",
+            splined_trimmed.r_min,
+            splined_no_trim.r_min
+        );
+
+        // Validate f32 accuracy: cast coefficients and compare
+        // The trimmed version should have smaller coefficient magnitudes
+        let max_coeff_no_trim = splined_no_trim
+            .coeffs
+            .iter()
+            .flat_map(|c| c.u.iter().chain(c.f.iter()))
+            .map(|v| v.abs())
+            .fold(0.0_f64, f64::max);
+        let max_coeff_trimmed = splined_trimmed
+            .coeffs
+            .iter()
+            .flat_map(|c| c.u.iter().chain(c.f.iter()))
+            .map(|v| v.abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            max_coeff_trimmed < max_coeff_no_trim,
+            "Trimmed max coeff ({:e}) should be < untrimmed ({:e})",
+            max_coeff_trimmed,
+            max_coeff_no_trim
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "energy_cap")]
+    fn test_energy_cap_panics_on_collapsed_range() {
+        let lj = LennardJones::new(1.0, 1.0);
+        let cutoff = 2.5;
+        // energy_cap so low that |U| exceeds it across the entire grid range
+        let config = SplineConfig::default()
+            .with_rsq_max(0.5) // r_max ≈ 0.707 where |U| ≈ 224
+            .with_grid_trim(GridTrim::RepulsiveDecay { energy_cap: 1.0 });
+        let _ = SplinedPotential::with_cutoff(&lj, cutoff, config);
+    }
+
+    #[test]
+    fn test_energy_cap_with_all_grid_types() {
+        let lj = LennardJones::new(1.0, 1.0);
+        let cutoff = 2.5;
+        let energy_cap = 500.0;
+
+        for grid_type in [
+            GridType::PowerLaw2,
+            GridType::InverseRsq,
+            GridType::UniformR,
+            GridType::UniformRsq,
+        ] {
+            let config = SplineConfig::default()
+                .with_grid_type(grid_type)
+                .with_grid_trim(GridTrim::RepulsiveDecay { energy_cap });
+            let splined = SplinedPotential::with_cutoff(&lj, cutoff, config);
+
+            assert!(
+                splined.r_min > 0.6,
+                "{:?}: r_min should be raised above 0.6, got {}",
+                grid_type,
+                splined.r_min
+            );
+
+            let u_at_rmin = lj
+                .isotropic_twobody_energy(splined.r_min * splined.r_min)
+                .abs();
+            assert!(
+                u_at_rmin <= energy_cap * 1.01,
+                "{:?}: |U(r_min²)| = {} exceeds energy_cap = {}",
+                grid_type,
+                u_at_rmin,
+                energy_cap
+            );
+        }
     }
 }

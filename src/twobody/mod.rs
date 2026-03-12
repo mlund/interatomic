@@ -54,8 +54,8 @@ pub use hermite::{
     SplineTableSimdF32, LANES_F32,
 };
 pub use hermite::{
-    spline_potential, GridType, SplineCoeffs, SplineConfig, SplineStats, SplinedPotential,
-    ValidationResult,
+    spline_potential, GridTrim, GridType, SplineCoeffs, SplineConfig, SplineStats,
+    SplinedPotential, ValidationResult,
 };
 pub use kimhummer::KimHummer;
 pub use lennard_jones::LennardJones;
