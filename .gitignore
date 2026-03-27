@@ -23,3 +23,4 @@ output.*
 .DS_Store
 .mypy*
 .ipynb_checkpoints
+SIMD_SPLINE.md
