@@ -35,34 +35,96 @@ use serde::{Deserialize, Serialize};
 /// let cutoff = 2.0_f64.powf(1.0/6.0) * sigma;
 /// let lj = LennardJones::new(epsilon, sigma);
 /// let ah = AshbaughHatch::new(lj.clone(), lambda, cutoff);
-/// let wca = WeeksChandlerAndersen::from(lj);
+/// let wca = WeeksChandlerAndersen::from(lj.clone());
 /// let r2 = sigma * sigma;
 /// assert_eq!(ah.isotropic_twobody_energy(r2), wca.isotropic_twobody_energy(r2));
+/// assert!(ah.is_wca());
+/// assert!(AshbaughHatch::new_wca(epsilon, sigma).is_wca());
 /// ~~~
 #[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(
     feature = "serde",
-    derive(Deserialize, Serialize),
-    serde(deny_unknown_fields)
+    derive(Serialize),
+    serde(into = "AshbaughHatchSerde")
 )]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct AshbaughHatch {
-    #[cfg_attr(feature = "serde", serde(flatten))]
     pub(crate) lennard_jones: LennardJones,
-    /// Dimensionless scaling factor, λ in the interval [0, 1]
-    #[cfg_attr(feature = "serde", serde(alias = "λ", default))]
     lambda: f64,
-    /// Spherical cutoff distance
-    #[cfg_attr(feature = "serde", serde(alias = "rc", default))]
     cutoff: f64,
 }
 
+/// Serde helper for deserializing with optional `wca` flag.
+#[cfg(feature = "serde")]
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AshbaughHatchSerde {
+    #[serde(flatten)]
+    lennard_jones: LennardJones,
+    #[serde(alias = "λ", default)]
+    lambda: f64,
+    #[serde(alias = "rc", default)]
+    cutoff: f64,
+    /// If true, set λ=1 and cutoff=σ·2^(1/6) (purely repulsive WCA).
+    #[serde(default)]
+    wca: bool,
+}
+
+#[cfg(feature = "serde")]
+impl From<AshbaughHatchSerde> for AshbaughHatch {
+    fn from(raw: AshbaughHatchSerde) -> Self {
+        if raw.wca {
+            Self::new_wca(raw.lennard_jones.epsilon(), raw.lennard_jones.sigma())
+        } else {
+            Self::new(raw.lennard_jones, raw.lambda, raw.cutoff)
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+impl From<AshbaughHatch> for AshbaughHatchSerde {
+    fn from(ah: AshbaughHatch) -> Self {
+        Self {
+            wca: ah.is_wca(),
+            lennard_jones: ah.lennard_jones,
+            lambda: ah.lambda,
+            cutoff: ah.cutoff,
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> Deserialize<'de> for AshbaughHatch {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        AshbaughHatchSerde::deserialize(deserializer).map(Into::into)
+    }
+}
+
 impl AshbaughHatch {
-    /// Create a new Ashbaugh-Hatch potential from a Lennard-Jones potential, lambda parameter, and cutoff.
+    /// Create a new Ashbaugh-Hatch potential.
     pub const fn new(lennard_jones: LennardJones, lambda: f64, cutoff: f64) -> Self {
         Self {
             lennard_jones,
             lambda,
             cutoff,
+        }
+    }
+
+    /// Create a WCA-equivalent potential (λ=1, cutoff=σ·2^(1/6)).
+    pub fn new_wca(epsilon: f64, sigma: f64) -> Self {
+        let lj = LennardJones::new(epsilon, sigma);
+        let cutoff = sigma * 2.0_f64.powf(1.0 / 6.0);
+        Self::new(lj, 1.0, cutoff)
+    }
+
+    /// True if equivalent to WCA (λ=1, cutoff ≈ σ·2^(1/6)).
+    pub fn is_wca(&self) -> bool {
+        self.lambda == 1.0 && {
+            let wca_cutoff = self.lennard_jones.sigma() * 2.0_f64.powf(1.0 / 6.0);
+            (self.cutoff - wca_cutoff).abs() < 1e-6 * self.lennard_jones.sigma()
         }
     }
 }
@@ -116,14 +178,23 @@ impl IsotropicTwobodyEnergy for AshbaughHatch {
 
 impl Display for AshbaughHatch {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(
-            f,
-            "Ashbaugh-Hatch with λ = {:.3}, cutoff = {:.3}, ε = {:.3}, σ = {:.3}",
-            self.lambda,
-            self.cutoff,
-            self.lennard_jones.epsilon(),
-            self.lennard_jones.sigma()
-        )
+        if self.is_wca() {
+            write!(
+                f,
+                "Ashbaugh-Hatch (WCA) with ε = {:.3}, σ = {:.3}",
+                self.lennard_jones.epsilon(),
+                self.lennard_jones.sigma()
+            )
+        } else {
+            write!(
+                f,
+                "Ashbaugh-Hatch with λ = {:.3}, cutoff = {:.3}, ε = {:.3}, σ = {:.3}",
+                self.lambda,
+                self.cutoff,
+                self.lennard_jones.epsilon(),
+                self.lennard_jones.sigma()
+            )
+        }
     }
 }
 
@@ -150,5 +221,38 @@ mod tests {
         );
         // Beyond cutoff: zero
         assert_relative_eq!(ah05.isotropic_twobody_force(30.0), 0.0);
+    }
+
+    #[test]
+    fn new_wca_is_wca() {
+        let ah = AshbaughHatch::new_wca(1.5, 2.0);
+        assert!(ah.is_wca());
+        // Energy matches WCA
+        let wca = WeeksChandlerAndersen::from(LennardJones::new(1.5, 2.0));
+        let r2 = 3.0; // inside core
+        assert_relative_eq!(
+            ah.isotropic_twobody_energy(r2),
+            wca.isotropic_twobody_energy(r2),
+            epsilon = 1e-10
+        );
+        // Zero beyond cutoff
+        let r2_far = 10.0;
+        assert_relative_eq!(ah.isotropic_twobody_energy(r2_far), 0.0);
+    }
+
+    #[test]
+    fn normal_ah_is_not_wca() {
+        let lj = LennardJones::new(1.5, 2.0);
+        assert!(!AshbaughHatch::new(lj.clone(), 0.5, 5.0).is_wca());
+        assert!(!AshbaughHatch::new(lj, 1.0, 5.0).is_wca());
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_wca_flag() {
+        let yaml = r#"{ epsilon: 1.5, sigma: 2.0, wca: true }"#;
+        let ah: AshbaughHatch = serde_json::from_str(yaml).unwrap();
+        assert!(ah.is_wca());
+        assert_eq!(ah.lambda, 1.0);
     }
 }
