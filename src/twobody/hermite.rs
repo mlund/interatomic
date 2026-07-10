@@ -1058,7 +1058,7 @@ impl SplinedPotential {
 // ============================================================================
 
 #[cfg(feature = "simd")]
-use wide::{f32x4, f64x4, CmpLt};
+use wide::{f32x4, f64x4};
 
 #[cfg(all(feature = "simd", not(target_arch = "aarch64")))]
 use wide::f32x8;
