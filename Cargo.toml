@@ -22,7 +22,7 @@ simd = ["dep:wide"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"], optional = true }
-exmex = { version = "0.20", features = ["partial"], optional = true }
+exmex = { version = "0.21", features = ["partial"], optional = true }
 nalgebra = { version = "0.35", features = ["serde-serialize"] }
 num = "0.4"
 coulomb = { version = "0.5.1", features = ["serde"] }
