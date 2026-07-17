@@ -1,6 +1,6 @@
 [package]
 name = "interatomic"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 description = "Library for calculating inter-particle interactions"
 readme = "README.md"
@@ -25,7 +25,7 @@ serde = { version = "1.0", features = ["derive"], optional = true }
 exmex = { version = "0.20", features = ["partial"], optional = true }
 nalgebra = { version = "0.35", features = ["serde-serialize"] }
 num = "0.4"
-coulomb = { version = "0.5.1", features = ["serde"] }
+coulomb = { version = "0.5.2", features = ["serde"] }
 dyn-clone = "1.0"
 bytemuck = { version = "1", features = ["derive"], optional = true }
 wide = { version = "1.1", optional = true }
