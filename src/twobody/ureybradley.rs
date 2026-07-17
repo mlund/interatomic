@@ -25,7 +25,11 @@ use serde::{Deserialize, Serialize};
 /// See <https://manual.gromacs.org/documentation/current/reference-manual/functions/bonded-interactions.html#urey-bradley-potential>
 /// for more information.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+#[cfg_attr(
+    feature = "serde",
+    derive(Deserialize, Serialize),
+    serde(deny_unknown_fields)
+)]
 pub struct UreyBradley {
     #[cfg_attr(feature = "serde", serde(rename = "req"))]
     eq_distance: f64,
