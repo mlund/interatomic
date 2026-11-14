@@ -89,6 +89,15 @@ impl<T: MultipoleEnergy + Debug + Clone + PartialEq + Send + Sync> IsotropicTwob
                 .scheme
                 .ion_ion_energy(self.charge_product, 1.0, distance_squared.sqrt())
     }
+
+    /// −dU/d(r²) = F/(2r) from the analytic field. The default central
+    /// difference straddles the truncation within ε of the cutoff.
+    fn isotropic_twobody_force(&self, distance_squared: f64) -> f64 {
+        let r = distance_squared.sqrt();
+        coulomb::TO_CHEMISTRY_UNIT / f64::from(self.permittivity)
+            * self.scheme.ion_field_scalar(self.charge_product, r)
+            / (2.0 * r)
+    }
 }
 
 impl<T: MultipoleEnergy + Cutoff> Cutoff for IonIon<T> {
@@ -249,4 +258,22 @@ mod tests {
             epsilon = 1e-7
         );
     }
+
+    /// The analytic force is −dU/d(r²), checked against a numerical derivative of the energy
+    /// for a truncated and a screened scheme.
+    #[test]
+    fn ion_ion_force_is_energy_derivative() {
+        let permittivity = ConstantPermittivity::new(80.0);
+        let check = |pot: &dyn IsotropicTwobodyEnergy| {
+            let rsq = 100.0;
+            let h = 1e-4;
+            let numeric = -(pot.isotropic_twobody_energy(rsq + h)
+                - pot.isotropic_twobody_energy(rsq - h))
+                / (2.0 * h);
+            assert_relative_eq!(pot.isotropic_twobody_force(rsq), numeric, max_relative = 1e-6);
+        };
+        check(&IonIon::new(-2.0, permittivity, Plain::new(30.0, None)));
+        check(&IonIon::new(1.0, permittivity, coulomb::pairwise::Yukawa::new(30.0, Some(8.0))));
+    }
+
 }

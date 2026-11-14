@@ -415,7 +415,8 @@ impl SplinedPotential {
         let r_min = rsq_min.sqrt();
         let r_max = rsq_max.sqrt();
 
-        // Calculate shifts at cutoff
+        // Shifts use the value at rc, so a potential truncated there stays
+        // truncated, exactly as evaluated without a table.
         let energy_shift = if config.shift_energy || config.shift_force {
             potential.isotropic_twobody_energy(rsq_max)
         } else {
@@ -427,6 +428,11 @@ impl SplinedPotential {
         } else {
             0.0
         };
+
+        // The outer node takes the limit from inside: a potential truncated at rc
+        // is already zero there, and a jump within the last interval makes the
+        // cubic ring.
+        let rsq_edge = rsq_max * (1.0 - 1e-12);
 
         // Build grid: compute (delta, grid_point_fn) based on grid type
         let r_range = r_max - r_min;
@@ -498,8 +504,9 @@ impl SplinedPotential {
             let (r, rsq) = grid_point(i);
             rsq_vals.push(rsq);
 
-            let mut u = potential.isotropic_twobody_energy(rsq) - energy_shift;
-            let mut f = potential.isotropic_twobody_force(rsq);
+            let eval_rsq = rsq.min(rsq_edge);
+            let mut u = potential.isotropic_twobody_energy(eval_rsq) - energy_shift;
+            let mut f = potential.isotropic_twobody_force(eval_rsq);
 
             if config.shift_force {
                 u -= (r - r_max) * force_shift;
@@ -784,6 +791,7 @@ impl SplinedPotential {
             grid_type: self.grid_type,
             memory_bytes: self.coeffs.len() * std::mem::size_of::<SplineCoeffs>(),
             energy_shift: self.energy_shift,
+            force_shift: self.force_shift,
         }
     }
 
@@ -981,6 +989,8 @@ pub struct SplineStats {
     pub memory_bytes: usize,
     /// Energy shift applied at cutoff
     pub energy_shift: f64,
+    /// Force shift applied at cutoff; energies also carry −(r − r_max)·force_shift
+    pub force_shift: f64,
 }
 
 /// Results from validating a spline against the original potential.
@@ -3555,4 +3565,31 @@ mod tests {
             );
         }
     }
+
+    /// A potential truncated at the table cutoff is zero exactly at `rc`. The outer node must take
+    /// the limit from inside, otherwise the last interval spans a jump and every backend built from
+    /// these coefficients rings near the cutoff. The shift is taken at `rc`, keeping the truncation.
+    #[test]
+    fn potential_truncated_at_table_cutoff_is_tabulated_smoothly() {
+        let cutoff = 30.0;
+        let plain = coulomb::pairwise::Plain::new(cutoff, Some(8.0));
+        let coulomb = IonIon::new(1.0, ConstantPermittivity::new(80.0), plain);
+        let combined = Combined::new(LennardJones::new(0.8, 6.0), coulomb);
+        let splined = SplinedPotential::with_cutoff(&combined, cutoff, SplineConfig::default());
+        let simd = splined.to_simd();
+        let simd_f32 = splined.to_simd_f32();
+        let shift = combined.isotropic_twobody_energy(cutoff * cutoff);
+        for r in [29.9, 29.98, 29.993, 29.999] {
+            let rsq = r * r;
+            let expected = combined.isotropic_twobody_energy(rsq) - shift;
+            for (backend, u) in [
+                ("scalar", splined.isotropic_twobody_energy(rsq)),
+                ("simd", simd.energy(rsq)),
+                ("simd_f32", f64::from(simd_f32.energy(rsq as f32))),
+            ] {
+                assert!((u - expected).abs() < 1e-3, "{backend} at r = {r}: {u} vs {expected}");
+            }
+        }
+    }
+
 }
