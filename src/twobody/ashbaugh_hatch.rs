@@ -127,6 +127,13 @@ impl AshbaughHatch {
             (self.cutoff - wca_cutoff).abs() < 1e-6 * self.lennard_jones.sigma()
         }
     }
+
+    /// Inside the repulsive wall, r ≤ 2^(1/6)σ, where λ only scales constants.
+    /// Energy and force must branch here alike.
+    #[inline(always)]
+    fn in_wall(&self, distance_squared: f64) -> bool {
+        distance_squared <= self.lennard_jones.sigma_squared * WeeksChandlerAndersen::TWOTOTWOSIXTH
+    }
 }
 
 impl Cutoff for AshbaughHatch {
@@ -156,9 +163,7 @@ impl IsotropicTwobodyEnergy for AshbaughHatch {
             .lennard_jones
             .isotropic_twobody_energy(self.cutoff_squared());
 
-        if distance_squared
-            <= self.lennard_jones.sigma_squared * WeeksChandlerAndersen::TWOTOTWOSIXTH
-        {
+        if self.in_wall(distance_squared) {
             self.lennard_jones
                 .epsilon()
                 .mul_add(1.0 - self.lambda, self.lambda.mul_add(-lj_rc, lj))
@@ -172,7 +177,12 @@ impl IsotropicTwobodyEnergy for AshbaughHatch {
         if distance_squared > self.cutoff_squared() {
             return 0.0;
         }
-        self.lambda * self.lennard_jones.isotropic_twobody_force(distance_squared)
+        let force = self.lennard_jones.isotropic_twobody_force(distance_squared);
+        if self.in_wall(distance_squared) {
+            force
+        } else {
+            self.lambda * force
+        }
     }
 }
 
@@ -204,23 +214,56 @@ mod tests {
     use approx::assert_relative_eq;
 
     #[test]
-    fn test_ashbaugh_hatch_force() {
+    fn force_is_zero_beyond_cutoff() {
+        let ah = AshbaughHatch::new(LennardJones::new(1.5, 2.0), 0.5, 5.0);
+        assert_relative_eq!(ah.isotropic_twobody_force(30.0), 0.0);
+    }
+
+    /// −dU/d(r²) by central difference, independent of the analytical force.
+    fn numerical_force(ah: &AshbaughHatch, rsq: f64) -> f64 {
+        let h = 1e-6 * rsq;
+        -(ah.isotropic_twobody_energy(rsq + h) - ah.isotropic_twobody_energy(rsq - h)) / (2.0 * h)
+    }
+
+    /// Squared distances inside the repulsive wall (r < 2^(1/6)σ) and in the
+    /// attractive tail, for σ = 2.
+    const WALL_AND_TAIL: [f64; 4] = [3.0, 4.0, 6.25, 9.0];
+
+    /// Inside r_min the energy is LJ plus a λ-dependent constant, so the wall
+    /// force must not scale with λ; negative λ would otherwise flip its sign.
+    #[test]
+    fn force_is_minus_the_energy_derivative() {
         let lj = LennardJones::new(1.5, 2.0);
-        let cutoff = 5.0;
-        // λ=1: identical to LJ
-        let ah1 = AshbaughHatch::new(lj.clone(), 1.0, cutoff);
-        assert_relative_eq!(
-            ah1.isotropic_twobody_force(6.25),
-            lj.isotropic_twobody_force(6.25)
-        );
-        // λ=0.5: half the LJ force
-        let ah05 = AshbaughHatch::new(lj.clone(), 0.5, cutoff);
-        assert_relative_eq!(
-            ah05.isotropic_twobody_force(6.25),
-            0.5 * lj.isotropic_twobody_force(6.25)
-        );
-        // Beyond cutoff: zero
-        assert_relative_eq!(ah05.isotropic_twobody_force(30.0), 0.0);
+        for lambda in [-0.3, 0.0, 0.5, 1.0, 1.5] {
+            let ah = AshbaughHatch::new(lj.clone(), lambda, 5.0);
+            for rsq in WALL_AND_TAIL {
+                assert_relative_eq!(
+                    ah.isotropic_twobody_force(rsq),
+                    numerical_force(&ah, rsq),
+                    max_relative = 1e-6,
+                    epsilon = 1e-9
+                );
+            }
+        }
+    }
+
+    /// λ = 1 is LJ and λ = 0 is WCA, wall and tail alike.
+    #[test]
+    fn force_reduces_to_lj_and_wca() {
+        let lj = LennardJones::new(1.5, 2.0);
+        let wca = WeeksChandlerAndersen::from(lj.clone());
+        let full = AshbaughHatch::new(lj.clone(), 1.0, 5.0);
+        let repulsive = AshbaughHatch::new(lj.clone(), 0.0, 5.0);
+        for rsq in WALL_AND_TAIL {
+            assert_relative_eq!(
+                full.isotropic_twobody_force(rsq),
+                lj.isotropic_twobody_force(rsq)
+            );
+            assert_relative_eq!(
+                repulsive.isotropic_twobody_force(rsq),
+                wca.isotropic_twobody_force(rsq)
+            );
+        }
     }
 
     #[test]
