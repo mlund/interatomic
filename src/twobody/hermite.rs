@@ -27,7 +27,7 @@
 //! let lj = LennardJones::new(1.0, 1.0);
 //!
 //! // Spline it for fast evaluation (cutoff required)
-//! let splined = SplinedPotential::with_cutoff(&lj, 2.5, SplineConfig::default());
+//! let splined = SplinedPotential::with_cutoff(&lj, 2.5, SplineConfig::default()).unwrap();
 //!
 //! // Use in inner loop (no sqrt needed!)
 //! let rsq = 1.5 * 1.5;
@@ -37,7 +37,7 @@
 //! }
 //! ```
 
-use super::IsotropicTwobodyEnergy;
+use super::{InvalidCutoff, IsotropicTwobodyEnergy};
 use coulomb::Cutoff;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -172,6 +172,40 @@ pub enum GridTrim {
     },
 }
 
+/// Why a spline table can't be built.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum SplineError {
+    /// The tabulation range must be finite and positive.
+    #[error(transparent)]
+    InvalidCutoff(#[from] InvalidCutoff),
+    /// The potential's own range is unbounded, so it can't set the table's extent.
+    #[error("potential has no finite range; use SplinedPotential::with_cutoff")]
+    Unbounded,
+    /// Cubic Hermite segments need at least 4 grid points.
+    #[error("need at least 4 grid points, got {0}")]
+    TooFewPoints(usize),
+    /// An explicit r² bound must be finite and non-negative (upper: positive).
+    #[error("invalid r² bound: {0}")]
+    InvalidBound(f64),
+    /// `GridTrim::RepulsiveDecay` cap must be finite and positive.
+    #[error("energy_cap must be finite and > 0, got {0}")]
+    InvalidEnergyCap(f64),
+    /// Lower bound at or above the upper bound.
+    #[error("empty tabulation domain: r²_min = {rsq_min} ≥ r²_max = {rsq_max}")]
+    EmptyDomain {
+        /// Lower bound of r²
+        rsq_min: f64,
+        /// Upper bound of r²
+        rsq_max: f64,
+    },
+    /// `GridTrim::RepulsiveDecay` would trim away the whole grid.
+    #[error("GridTrim::RepulsiveDecay: energy_cap ({0}) is too low; |U| exceeds it across the entire grid range")]
+    EnergyCapTooLow(f64),
+    /// `GridType::PowerLaw` exponent must be positive.
+    #[error("power-law exponent must be positive, got {0}")]
+    NonPositiveExponent(f64),
+}
+
 /// Configuration for spline table construction
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
@@ -246,6 +280,32 @@ impl SplineConfig {
     pub const fn with_grid_trim(mut self, trim: GridTrim) -> Self {
         self.grid_trim = trim;
         self
+    }
+
+    /// Refuse values that would silently build a NaN or degenerate table;
+    /// NaN fails every comparison, so each test is phrased to reject it.
+    fn check(&self) -> Result<(), SplineError> {
+        let ok_bound = |b: Option<f64>, min: f64| b.is_none_or(|b| b.is_finite() && b >= min);
+        if self.n_points < 4 {
+            return Err(SplineError::TooFewPoints(self.n_points));
+        }
+        if !ok_bound(self.rsq_min, 0.0) {
+            return Err(SplineError::InvalidBound(self.rsq_min.unwrap_or_default()));
+        }
+        if !ok_bound(self.rsq_max, f64::MIN_POSITIVE) {
+            return Err(SplineError::InvalidBound(self.rsq_max.unwrap_or_default()));
+        }
+        if let GridType::PowerLaw(p) = self.grid_type {
+            if !(p.is_finite() && p > 0.0) {
+                return Err(SplineError::NonPositiveExponent(p));
+            }
+        }
+        if let GridTrim::RepulsiveDecay { energy_cap } = self.grid_trim {
+            if !(energy_cap.is_finite() && energy_cap > 0.0) {
+                return Err(SplineError::InvalidEnergyCap(energy_cap));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -335,15 +395,17 @@ impl SplinedPotential {
     /// * `potential` - The analytical potential to tabulate (must implement Cutoff)
     /// * `config` - Configuration for the spline table
     ///
-    /// # Panics
-    /// Panics if `n_points < 4`, if rsq_min >= rsq_max, or if cutoff is infinite
-    pub fn new<P: IsotropicTwobodyEnergy + Cutoff>(potential: &P, config: SplineConfig) -> Self {
+    /// # Errors
+    /// [`SplineError::Unbounded`] for an infinite range, otherwise as [`Self::with_cutoff`].
+    pub fn new<P: IsotropicTwobodyEnergy + Cutoff>(
+        potential: &P,
+        config: SplineConfig,
+    ) -> Result<Self, SplineError> {
         let cutoff = potential.cutoff();
-        assert!(
-            cutoff.is_finite(),
-            "Cutoff must be finite; use with_cutoff() for potentials without Cutoff"
-        );
-        Self::build(potential, cutoff, config)
+        if cutoff == f64::INFINITY {
+            return Err(SplineError::Unbounded);
+        }
+        Self::with_cutoff(potential, cutoff, config)
     }
 
     /// Create a new splined potential with an explicit cutoff distance.
@@ -356,17 +418,14 @@ impl SplinedPotential {
     /// * `cutoff` - The cutoff distance (must be finite and positive)
     /// * `config` - Configuration for the spline table
     ///
-    /// # Panics
-    /// Panics if `n_points < 4`, if rsq_min >= rsq_max, or if cutoff is not finite/positive
+    /// # Errors
+    /// See [`SplineError`].
     pub fn with_cutoff<P: IsotropicTwobodyEnergy + Cutoff>(
         potential: &P,
         cutoff: f64,
         config: SplineConfig,
-    ) -> Self {
-        assert!(
-            cutoff.is_finite() && cutoff > 0.0,
-            "Cutoff must be finite and positive"
-        );
+    ) -> Result<Self, SplineError> {
+        let cutoff = InvalidCutoff::check(cutoff)?;
         Self::build(potential, cutoff, config)
     }
 
@@ -375,42 +434,19 @@ impl SplinedPotential {
         potential: &P,
         cutoff: f64,
         config: SplineConfig,
-    ) -> Self {
+    ) -> Result<Self, SplineError> {
+        config.check()?;
         let n = config.n_points;
-        assert!(n >= 4, "Need at least 4 grid points");
 
         let rsq_max = config.rsq_max.unwrap_or(cutoff * cutoff);
         // Use lower_cutoff from potential if rsq_min not explicitly set
         let lower = potential.lower_cutoff();
         let rsq_min = config.rsq_min.unwrap_or(lower * lower).max(1e-10); // Avoid zero/negative values
 
-        // Raise rsq_min so that large-magnitude coefficients near the repulsive wall
-        // don't lose precision when cast to f32 on GPU/SIMD paths.
-        let rsq_min = match config.grid_trim {
-            GridTrim::NoTrim => rsq_min,
-            GridTrim::RepulsiveDecay { energy_cap } => {
-                let u_at_min = potential.isotropic_twobody_energy(rsq_min).abs();
-                if u_at_min > energy_cap {
-                    // Bisect in r-space (not r²) for uniform convergence rate
-                    let r_lo = rsq_min.sqrt();
-                    let r_hi = rsq_max.sqrt();
-                    let new_r = find_r_at_energy(potential, energy_cap, r_lo, r_hi);
-                    let new_rsq = new_r * new_r;
-                    // If |U| > energy_cap everywhere, the bisection converges to r_hi
-                    // and new_rsq ≈ rsq_max — catch this degenerate case with tolerance.
-                    assert!(
-                        new_rsq < rsq_max * (1.0 - 1e-6),
-                        "GridTrim::RepulsiveDecay: energy_cap ({energy_cap}) is too low; \
-                         |U| exceeds it across the entire grid range"
-                    );
-                    new_rsq
-                } else {
-                    rsq_min
-                }
-            }
-        };
-
-        assert!(rsq_min < rsq_max, "rsq_min must be less than rsq_max");
+        let rsq_min = trim_rsq_min(potential, &config.grid_trim, rsq_min, rsq_max)?;
+        if rsq_min >= rsq_max {
+            return Err(SplineError::EmptyDomain { rsq_min, rsq_max });
+        }
 
         let r_min = rsq_min.sqrt();
         let r_max = rsq_max.sqrt();
@@ -461,17 +497,14 @@ impl SplinedPotential {
                     }),
                 )
             }
-            GridType::PowerLaw(p) => {
-                assert!(p > 0.0, "Power-law exponent must be positive");
-                (
-                    p,
-                    Box::new(move |i| {
-                        let x = i as f64 / n_f64;
-                        let r = r_min + r_range * x.powf(p);
-                        (r, r * r)
-                    }),
-                )
-            }
+            GridType::PowerLaw(p) => (
+                p,
+                Box::new(move |i| {
+                    let x = i as f64 / n_f64;
+                    let r = r_min + r_range * x.powf(p);
+                    (r, r * r)
+                }),
+            ),
             GridType::PowerLaw2 => (
                 2.0,
                 Box::new(move |i| {
@@ -530,7 +563,7 @@ impl SplinedPotential {
             f_at_rmin -= force_shift;
         }
 
-        Self {
+        Ok(Self {
             coeffs,
             grid_type: config.grid_type,
             r_min,
@@ -542,7 +575,7 @@ impl SplinedPotential {
             force_shift,
             cutoff,
             f_at_rmin,
-        }
+        })
     }
 
     /// Compute cubic Hermite spline coefficients.
@@ -1006,16 +1039,45 @@ pub struct ValidationResult {
     pub worst_rsq_force: f64,
 }
 
+/// Raise rsq_min so that large-magnitude coefficients near the repulsive wall
+/// don't lose precision when cast to f32 on GPU/SIMD paths.
+fn trim_rsq_min<P: IsotropicTwobodyEnergy>(
+    potential: &P,
+    trim: &GridTrim,
+    rsq_min: f64,
+    rsq_max: f64,
+) -> Result<f64, SplineError> {
+    let &GridTrim::RepulsiveDecay { energy_cap } = trim else {
+        return Ok(rsq_min);
+    };
+    if potential.isotropic_twobody_energy(rsq_min).abs() <= energy_cap {
+        return Ok(rsq_min);
+    }
+    // Bisect in r-space (not r²) for uniform convergence rate
+    let new_r = find_r_at_energy(potential, energy_cap, rsq_min.sqrt(), rsq_max.sqrt());
+    let new_rsq = new_r * new_r;
+    // If |U| > energy_cap everywhere, the bisection converges to r_hi
+    // and new_rsq ≈ rsq_max — catch this degenerate case with tolerance.
+    if new_rsq < rsq_max * (1.0 - 1e-6) {
+        Ok(new_rsq)
+    } else {
+        Err(SplineError::EnergyCapTooLow(energy_cap))
+    }
+}
+
 // ============================================================================
 // Convenience function for splining without the generic
 // ============================================================================
 
 /// Create a boxed splined potential (useful for heterogeneous collections)
-pub fn spline_potential<P>(potential: &P, config: SplineConfig) -> Box<dyn IsotropicTwobodyEnergy>
+pub fn spline_potential<P>(
+    potential: &P,
+    config: SplineConfig,
+) -> Result<Box<dyn IsotropicTwobodyEnergy>, SplineError>
 where
     P: IsotropicTwobodyEnergy + Cutoff + 'static,
 {
-    Box::new(SplinedPotential::new(potential, config))
+    Ok(Box::new(SplinedPotential::new(potential, config)?))
 }
 
 // ============================================================================
@@ -2030,7 +2092,7 @@ mod tests {
         let config = SplineConfig::high_accuracy()
             .with_rsq_min(rsq_min)
             .with_rsq_max(rsq_max);
-        let splined = SplinedPotential::with_cutoff(&combined, cutoff, config);
+        let splined = SplinedPotential::with_cutoff(&combined, cutoff, config).unwrap();
 
         println!("\n=== AshbaughHatch + Yukawa Spline Test ===");
         println!(
@@ -2240,7 +2302,7 @@ mod tests {
             .with_rsq_min(rsq_min)
             .with_rsq_max(rsq_max)
             .with_grid_type(GridType::PowerLaw(2.0));
-        let splined = SplinedPotential::with_cutoff(&combined, cutoff, config);
+        let splined = SplinedPotential::with_cutoff(&combined, cutoff, config).unwrap();
 
         println!("\n=== PowerLaw(2) Grid Test ===");
         let stats = splined.stats();
@@ -2288,7 +2350,7 @@ mod tests {
     fn test_splined_lj_energy() {
         let lj = LennardJones::new(1.0, 1.0);
         let cutoff = 2.5;
-        let splined = SplinedPotential::with_cutoff(&lj, cutoff, SplineConfig::default());
+        let splined = SplinedPotential::with_cutoff(&lj, cutoff, SplineConfig::default()).unwrap();
 
         // Test at minimum (r = 2^(1/6) σ ≈ 1.122)
         let r_min = 2.0_f64.powf(1.0 / 6.0);
@@ -2305,7 +2367,7 @@ mod tests {
     fn test_splined_lj_force() {
         let lj = LennardJones::new(1.0, 1.0);
         let cutoff = 2.5;
-        let splined = SplinedPotential::with_cutoff(&lj, cutoff, SplineConfig::default());
+        let splined = SplinedPotential::with_cutoff(&lj, cutoff, SplineConfig::default()).unwrap();
 
         // Test force at r = 1.5σ
         let rsq = 2.25;
@@ -2324,7 +2386,7 @@ mod tests {
         let config = SplineConfig::high_accuracy()
             .with_rsq_min(1.0) // r ≥ 1.0σ (near the minimum)
             .with_rsq_max(cutoff * cutoff);
-        let splined = SplinedPotential::with_cutoff(&lj, cutoff, config);
+        let splined = SplinedPotential::with_cutoff(&lj, cutoff, config).unwrap();
 
         // Validate returns results even if accuracy isn't perfect
         let result = splined.validate(&lj, 1000);
@@ -2340,7 +2402,7 @@ mod tests {
     fn test_cutoff_behavior() {
         let lj = LennardJones::new(1.0, 1.0);
         let cutoff = 2.5;
-        let splined = SplinedPotential::with_cutoff(&lj, cutoff, SplineConfig::default());
+        let splined = SplinedPotential::with_cutoff(&lj, cutoff, SplineConfig::default()).unwrap();
 
         // Beyond cutoff should return 0
         let rsq_beyond = 7.0; // > 2.5²
@@ -2352,7 +2414,7 @@ mod tests {
     fn test_stats() {
         let lj = LennardJones::new(1.0, 1.0);
         let cutoff = 2.5;
-        let splined = SplinedPotential::with_cutoff(&lj, cutoff, SplineConfig::default());
+        let splined = SplinedPotential::with_cutoff(&lj, cutoff, SplineConfig::default()).unwrap();
 
         let stats = splined.stats();
         assert_eq!(stats.n_points, 2000);
@@ -2372,7 +2434,8 @@ mod tests {
             SplineConfig::high_accuracy() // Use more points for this legacy grid
                 .with_rsq_min(rsq_min)
                 .with_grid_type(GridType::UniformRsq),
-        );
+        )
+        .unwrap();
 
         // Test energy at a few points (UniformRsq is legacy with lower accuracy)
         let test_rsq = [1.2, 2.0, 4.0, 6.0];
@@ -2416,7 +2479,7 @@ mod tests {
     fn test_simd_matches_scalar() {
         let lj = LennardJones::new(1.0, 1.0);
         let cutoff = 2.5;
-        let splined = SplinedPotential::with_cutoff(&lj, cutoff, SplineConfig::default());
+        let splined = SplinedPotential::with_cutoff(&lj, cutoff, SplineConfig::default()).unwrap();
         let simd = splined.to_simd();
 
         // Test batch of distances
@@ -2448,7 +2511,7 @@ mod tests {
     fn test_simd_batch_output() {
         let lj = LennardJones::new(1.0, 1.0);
         let cutoff = 2.5;
-        let splined = SplinedPotential::with_cutoff(&lj, cutoff, SplineConfig::default());
+        let splined = SplinedPotential::with_cutoff(&lj, cutoff, SplineConfig::default()).unwrap();
         let simd = splined.to_simd();
 
         let distances = vec![1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 7.0];
@@ -2484,7 +2547,8 @@ mod tests {
             &lj,
             cutoff,
             SplineConfig::default().with_rsq_min(rsq_min),
-        );
+        )
+        .unwrap();
 
         // Scan from r=0.1 to r=0.5 σ with fine resolution
         // This is the steep repulsive region where sign reversal could occur
@@ -2528,7 +2592,8 @@ mod tests {
             &combined,
             100.0,
             SplineConfig::default().with_rsq_min(rsq_min),
-        );
+        )
+        .unwrap();
 
         // Scan from r=0.1 to r=1.0 Å
         for i in 0..9000 {
@@ -2573,7 +2638,8 @@ mod tests {
             SplineConfig::high_accuracy()
                 .with_rsq_min(rsq_min)
                 .with_grid_type(GridType::UniformR),
-        );
+        )
+        .unwrap();
 
         for i in 0..9000 {
             let r = 0.1 + (i as f64) * 0.0001;
@@ -2616,7 +2682,8 @@ mod tests {
             SplineConfig::default()
                 .with_rsq_min(rsq_min)
                 .with_grid_type(GridType::PowerLaw(2.0)),
-        );
+        )
+        .unwrap();
 
         let splined_opt = SplinedPotential::with_cutoff(
             &lj,
@@ -2624,7 +2691,8 @@ mod tests {
             SplineConfig::default()
                 .with_rsq_min(rsq_min)
                 .with_grid_type(GridType::PowerLaw2),
-        );
+        )
+        .unwrap();
 
         // Test energy and force at multiple distances
         let test_rsq = [0.6, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0];
@@ -2666,7 +2734,8 @@ mod tests {
             &lj,
             cutoff,
             SplineConfig::default().with_grid_type(GridType::PowerLaw2),
-        );
+        )
+        .unwrap();
         let simd = splined.to_simd();
 
         let distances: Vec<f64> = (0..100).map(|i| 1.0 + 0.05 * i as f64).collect();
@@ -2701,7 +2770,8 @@ mod tests {
             SplineConfig::default()
                 .with_rsq_min(rsq_min)
                 .with_grid_type(GridType::PowerLaw2),
-        );
+        )
+        .unwrap();
 
         // Scan repulsive region
         for i in 0..4000 {
@@ -2745,7 +2815,8 @@ mod tests {
             SplineConfig::high_accuracy()
                 .with_rsq_min(rsq_min)
                 .with_grid_type(GridType::PowerLaw2),
-        );
+        )
+        .unwrap();
 
         // Test accuracy at various distances
         let test_distances = [0.5, 1.0, 10.0, 30.0, 40.0];
@@ -2814,7 +2885,8 @@ mod tests {
             SplineConfig::default()
                 .with_rsq_min(rsq_min)
                 .with_grid_type(GridType::InverseRsq),
-        );
+        )
+        .unwrap();
 
         println!("\n=== InverseRsq Grid Test (Pure LJ) ===");
         let stats = splined.stats();
@@ -2894,8 +2966,8 @@ mod tests {
             ..Default::default()
         };
 
-        let splined_inv = SplinedPotential::with_cutoff(&lj, cutoff, config_inv);
-        let splined_pl2 = SplinedPotential::with_cutoff(&lj, cutoff, config_pl2);
+        let splined_inv = SplinedPotential::with_cutoff(&lj, cutoff, config_inv).unwrap();
+        let splined_pl2 = SplinedPotential::with_cutoff(&lj, cutoff, config_pl2).unwrap();
 
         println!(
             "\n=== InverseRsq vs PowerLaw2 Comparison (LJ, {} points) ===",
@@ -2957,7 +3029,8 @@ mod tests {
             SplineConfig::default()
                 .with_rsq_min(rsq_min)
                 .with_grid_type(GridType::InverseRsq),
-        );
+        )
+        .unwrap();
 
         // Scan repulsive region
         for i in 0..4000 {
@@ -3001,7 +3074,8 @@ mod tests {
             SplineConfig::high_accuracy()
                 .with_rsq_min(rsq_min)
                 .with_grid_type(GridType::InverseRsq),
-        );
+        )
+        .unwrap();
 
         // Scan from r=0.1 to r=1.0 Å
         for i in 0..9000 {
@@ -3036,7 +3110,8 @@ mod tests {
             &lj,
             cutoff,
             SplineConfig::default().with_grid_type(GridType::InverseRsq),
-        );
+        )
+        .unwrap();
         let simd = splined.to_simd();
 
         let distances: Vec<f64> = (0..100).map(|i| 1.0 + 0.05 * i as f64).collect();
@@ -3067,7 +3142,8 @@ mod tests {
             &lj,
             cutoff,
             SplineConfig::default().with_grid_type(GridType::InverseRsq),
-        );
+        )
+        .unwrap();
 
         // Test at minimum (r = 2^(1/6) σ ≈ 1.122)
         let r_min = 2.0_f64.powf(1.0 / 6.0);
@@ -3093,7 +3169,8 @@ mod tests {
             &lj,
             cutoff,
             SplineConfig::default().with_grid_type(GridType::InverseRsq),
-        );
+        )
+        .unwrap();
 
         // Test force at r = 1.5σ
         let rsq = 2.25;
@@ -3119,7 +3196,8 @@ mod tests {
             &lj,
             cutoff,
             SplineConfig::default().with_rsq_min(rsq_min),
-        );
+        )
+        .unwrap();
 
         // Get values at r_min
         let u_at_rmin = splined.isotropic_twobody_energy(rsq_min);
@@ -3185,7 +3263,8 @@ mod tests {
             &lj,
             cutoff,
             SplineConfig::default().with_rsq_min(rsq_min),
-        );
+        )
+        .unwrap();
 
         let r_min = rsq_min.sqrt();
         let f_at_rmin = splined.isotropic_twobody_force(rsq_min);
@@ -3219,7 +3298,8 @@ mod tests {
             &lj,
             cutoff,
             SplineConfig::default().with_rsq_min(rsq_min),
-        );
+        )
+        .unwrap();
         let simd = splined.to_simd();
 
         // Test with values both above and below r_min
@@ -3251,7 +3331,7 @@ mod tests {
     fn test_f32_simd_matches_scalar() {
         let lj = LennardJones::new(1.0, 1.0);
         let cutoff = 2.5;
-        let splined = SplinedPotential::with_cutoff(&lj, cutoff, SplineConfig::default());
+        let splined = SplinedPotential::with_cutoff(&lj, cutoff, SplineConfig::default()).unwrap();
         let simd_f32 = SplineTableSimdF32::from_spline(&splined);
 
         // Test batch of distances
@@ -3289,7 +3369,7 @@ mod tests {
         let lj = LennardJones::new(1.0, 1.0);
         let cutoff = 2.5;
         let config = SplineConfig::default().with_grid_type(GridType::PowerLaw2);
-        let splined = SplinedPotential::with_cutoff(&lj, cutoff, config);
+        let splined = SplinedPotential::with_cutoff(&lj, cutoff, config).unwrap();
         let simd_f32 = SplineTableSimdF32::from_spline(&splined);
 
         let distances: Vec<f32> = (0..100).map(|i| 0.8f32 + 0.04 * i as f32).collect();
@@ -3320,7 +3400,8 @@ mod tests {
             SplineConfig::default()
                 .with_rsq_min(rsq_min)
                 .with_grid_type(GridType::InverseRsq),
-        );
+        )
+        .unwrap();
 
         let u_at_rmin = splined.isotropic_twobody_energy(rsq_min);
 
@@ -3365,7 +3446,7 @@ mod tests {
         let energy_cap = 1000.0;
         let config =
             SplineConfig::default().with_grid_trim(GridTrim::RepulsiveDecay { energy_cap });
-        let splined = SplinedPotential::with_cutoff(&lj, cutoff, config);
+        let splined = SplinedPotential::with_cutoff(&lj, cutoff, config).unwrap();
 
         // Default lower_cutoff for LJ σ=1 is 0.6, so r_min should be raised above that
         assert!(
@@ -3394,7 +3475,7 @@ mod tests {
         let config = SplineConfig::default()
             .with_rsq_min(rsq_min)
             .with_grid_trim(GridTrim::RepulsiveDecay { energy_cap });
-        let splined = SplinedPotential::with_cutoff(&lj, cutoff, config);
+        let splined = SplinedPotential::with_cutoff(&lj, cutoff, config).unwrap();
 
         let actual_rmin = splined.r_min;
         assert!(
@@ -3409,12 +3490,14 @@ mod tests {
         let lj = LennardJones::new(1.0, 1.0);
         let cutoff = 2.5;
 
-        let without_trim = SplinedPotential::with_cutoff(&lj, cutoff, SplineConfig::default());
+        let without_trim =
+            SplinedPotential::with_cutoff(&lj, cutoff, SplineConfig::default()).unwrap();
         let with_trim = SplinedPotential::with_cutoff(
             &lj,
             cutoff,
             SplineConfig::default().with_grid_trim(GridTrim::RepulsiveDecay { energy_cap: 1000.0 }),
-        );
+        )
+        .unwrap();
 
         // Compare accuracy in the tail region (r > 1.5σ) — should be comparable or better
         let mut max_err_without = 0.0_f64;
@@ -3444,7 +3527,7 @@ mod tests {
         let cutoff = 2.5;
         let config =
             SplineConfig::default().with_grid_trim(GridTrim::RepulsiveDecay { energy_cap: 100.0 });
-        let splined = SplinedPotential::with_cutoff(&lj, cutoff, config);
+        let splined = SplinedPotential::with_cutoff(&lj, cutoff, config).unwrap();
 
         let rsq_min = splined.r_min * splined.r_min;
 
@@ -3481,11 +3564,12 @@ mod tests {
         let energy_cap = 100.0; // |U| at default r_min ≈ 1750, well above cap
 
         // Without trim
-        let splined_no_trim = SplinedPotential::with_cutoff(&lj, cutoff, SplineConfig::default());
+        let splined_no_trim =
+            SplinedPotential::with_cutoff(&lj, cutoff, SplineConfig::default()).unwrap();
         // With trim
         let config =
             SplineConfig::default().with_grid_trim(GridTrim::RepulsiveDecay { energy_cap });
-        let splined_trimmed = SplinedPotential::with_cutoff(&lj, cutoff, config);
+        let splined_trimmed = SplinedPotential::with_cutoff(&lj, cutoff, config).unwrap();
 
         // r_min should be raised significantly from the default
         assert!(
@@ -3518,15 +3602,17 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "energy_cap")]
-    fn test_energy_cap_panics_on_collapsed_range() {
+    fn test_energy_cap_errs_on_collapsed_range() {
         let lj = LennardJones::new(1.0, 1.0);
         let cutoff = 2.5;
         // energy_cap so low that |U| exceeds it across the entire grid range
         let config = SplineConfig::default()
             .with_rsq_max(0.5) // r_max ≈ 0.707 where |U| ≈ 224
             .with_grid_trim(GridTrim::RepulsiveDecay { energy_cap: 1.0 });
-        let _ = SplinedPotential::with_cutoff(&lj, cutoff, config);
+        assert_eq!(
+            SplinedPotential::with_cutoff(&lj, cutoff, config).unwrap_err(),
+            SplineError::EnergyCapTooLow(1.0)
+        );
     }
 
     #[test]
@@ -3544,7 +3630,7 @@ mod tests {
             let config = SplineConfig::default()
                 .with_grid_type(grid_type)
                 .with_grid_trim(GridTrim::RepulsiveDecay { energy_cap });
-            let splined = SplinedPotential::with_cutoff(&lj, cutoff, config);
+            let splined = SplinedPotential::with_cutoff(&lj, cutoff, config).unwrap();
 
             assert!(
                 splined.r_min > 0.6,
@@ -3575,7 +3661,8 @@ mod tests {
         let plain = coulomb::pairwise::Plain::new(cutoff, Some(8.0));
         let coulomb = IonIon::new(1.0, ConstantPermittivity::new(80.0), plain);
         let combined = Combined::new(LennardJones::new(0.8, 6.0), coulomb);
-        let splined = SplinedPotential::with_cutoff(&combined, cutoff, SplineConfig::default());
+        let splined =
+            SplinedPotential::with_cutoff(&combined, cutoff, SplineConfig::default()).unwrap();
         let simd = splined.to_simd();
         let simd_f32 = splined.to_simd_f32();
         let shift = combined.isotropic_twobody_energy(cutoff * cutoff);
@@ -3587,9 +3674,11 @@ mod tests {
                 ("simd", simd.energy(rsq)),
                 ("simd_f32", f64::from(simd_f32.energy(rsq as f32))),
             ] {
-                assert!((u - expected).abs() < 1e-3, "{backend} at r = {r}: {u} vs {expected}");
+                assert!(
+                    (u - expected).abs() < 1e-3,
+                    "{backend} at r = {r}: {u} vs {expected}"
+                );
             }
         }
     }
-
 }

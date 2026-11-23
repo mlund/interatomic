@@ -235,7 +235,7 @@ fn bench_spline_single(c: &mut Criterion) {
         rsq_min: Some((0.8 * sigma).powi(2)),
         ..Default::default()
     };
-    let splined_ahy = SplinedPotential::with_cutoff(&ahy, cutoff, config);
+    let splined_ahy = SplinedPotential::with_cutoff(&ahy, cutoff, config).unwrap();
     group.bench_function("AH_Yukawa_splined", |b| {
         b.iter(|| splined_ahy.isotropic_twobody_energy(black_box(r_squared)))
     });
@@ -293,7 +293,7 @@ fn bench_spline_batch(c: &mut Criterion) {
         rsq_min: Some((0.8 * sigma).powi(2)),
         ..Default::default()
     };
-    let splined = SplinedPotential::with_cutoff(&ahy, cutoff, config);
+    let splined = SplinedPotential::with_cutoff(&ahy, cutoff, config).unwrap();
 
     group.bench_with_input(
         BenchmarkId::new("AH_Yukawa_splined_scalar", n_pairs),

@@ -34,38 +34,27 @@
 //! let energy = lj.isotropic_twobody_energy(r * r);
 //! ```
 
-use super::IsotropicTwobodyEnergy;
+use super::{InvalidCutoff, IsotropicTwobodyEnergy};
 use crate::Cutoff;
 use exmex::{Differentiate, Express, FlatEx};
 use std::fmt;
 
 /// Errors that can occur when creating a [`CustomPotential`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum CustomPotentialError {
     /// The expression could not be parsed.
+    #[error("expression parse error: {0}")]
     ParseError(String),
     /// Symbolic differentiation failed.
+    #[error("derivative error: {0}")]
     DerivativeError(String),
     /// The expression contains unresolved variables (not `r`).
+    #[error("unresolved variables: {}", .0.join(", "))]
     UnresolvedVariables(Vec<String>),
     /// The cutoff is not positive and finite.
-    InvalidCutoff(f64),
+    #[error(transparent)]
+    InvalidCutoff(#[from] InvalidCutoff),
 }
-
-impl fmt::Display for CustomPotentialError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ParseError(msg) => write!(f, "expression parse error: {msg}"),
-            Self::DerivativeError(msg) => write!(f, "derivative error: {msg}"),
-            Self::UnresolvedVariables(vars) => {
-                write!(f, "unresolved variables: {}", vars.join(", "))
-            }
-            Self::InvalidCutoff(c) => write!(f, "cutoff must be positive and finite, got {c}"),
-        }
-    }
-}
-
-impl std::error::Error for CustomPotentialError {}
 
 /// A pair potential defined by a mathematical expression in `r`.
 ///
@@ -119,9 +108,7 @@ impl CustomPotential {
         parameters: &[(&str, f64)],
         cutoff: f64,
     ) -> Result<Self, CustomPotentialError> {
-        if !cutoff.is_finite() || cutoff <= 0.0 {
-            return Err(CustomPotentialError::InvalidCutoff(cutoff));
-        }
+        let cutoff = InvalidCutoff::check(cutoff)?;
 
         let substituted = substitute_parameters(expression, parameters);
 
@@ -418,8 +405,9 @@ mod tests {
         .with_lower_cutoff(0.6);
 
         let splined_native =
-            SplinedPotential::with_cutoff(&native_lj, 2.5, SplineConfig::default());
-        let splined_custom = SplinedPotential::with_cutoff(&custom, 2.5, SplineConfig::default());
+            SplinedPotential::with_cutoff(&native_lj, 2.5, SplineConfig::default()).unwrap();
+        let splined_custom =
+            SplinedPotential::with_cutoff(&custom, 2.5, SplineConfig::default()).unwrap();
 
         // Compare splined custom vs splined native (both shifted identically)
         for &r in &[1.0, 1.1, 1.5, 2.0, 2.4] {

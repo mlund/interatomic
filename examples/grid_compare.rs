@@ -38,7 +38,8 @@ fn main() {
         SplineConfig::default()
             .with_rsq_min(rsq_min)
             .with_grid_type(GridType::UniformRsq),
-    );
+    )
+    .unwrap();
 
     let spline_powerlaw = SplinedPotential::with_cutoff(
         &combined,
@@ -46,7 +47,8 @@ fn main() {
         SplineConfig::default()
             .with_rsq_min(rsq_min)
             .with_grid_type(GridType::PowerLaw2),
-    );
+    )
+    .unwrap();
 
     let spline_inversersq = SplinedPotential::with_cutoff(
         &combined,
@@ -54,7 +56,8 @@ fn main() {
         SplineConfig::default()
             .with_rsq_min(rsq_min)
             .with_grid_type(GridType::InverseRsq),
-    );
+    )
+    .unwrap();
 
     // Print header
     println!();

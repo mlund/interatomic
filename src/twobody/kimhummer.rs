@@ -20,7 +20,7 @@
 //! - Miyazawa & Jernigan (1996) J. Mol. Biol. 256, 623-644
 //!   <https://doi.org/10.1006/jmbi.1996.0114>
 
-use crate::twobody::IsotropicTwobodyEnergy;
+use crate::twobody::{InvalidCutoff, IsotropicTwobodyEnergy};
 
 use coulomb::Cutoff;
 #[cfg(feature = "serde")]
@@ -42,6 +42,10 @@ use serde::{Deserialize, Serialize};
 ///
 /// The potential is continuous at r₀ for all epsilon values.
 ///
+/// The published model is untruncated (`cutoff()` = ∞). [`KimHummer::with_cutoff`]
+/// (serde: `cutoff` or `rc`) gives a finite range: u(r) − u(rc) inside, zero beyond,
+/// so the energy is continuous at rc while the force is not shifted.
+///
 /// # Examples
 /// ```
 /// use interatomic::twobody::*;
@@ -51,19 +55,63 @@ use serde::{Deserialize, Serialize};
 /// let u = kh.isotropic_twobody_energy(r_min * r_min);
 /// assert!((u - (-0.5)).abs() < 1e-10);
 /// ```
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(
     feature = "serde",
     derive(Deserialize, Serialize),
-    serde(deny_unknown_fields)
+    serde(try_from = "KimHummerSerde", into = "KimHummerSerde")
 )]
 pub struct KimHummer {
     /// Interaction strength (kT)
-    #[cfg_attr(feature = "serde", serde(alias = "eps", alias = "ε"))]
     epsilon: f64,
     /// Contact distance (Å or other length unit)
-    #[cfg_attr(feature = "serde", serde(alias = "σ"))]
     sigma: f64,
+    /// Interaction range; ∞ is the published, untruncated model
+    cutoff: f64,
+    /// Untruncated U(rc), subtracted so the energy is continuous at rc
+    shift: f64,
+}
+
+impl Default for KimHummer {
+    fn default() -> Self {
+        Self::new(0.0, 0.0)
+    }
+}
+
+/// Serde helper: validates the optional cutoff and recomputes the shift.
+#[cfg(feature = "serde")]
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct KimHummerSerde {
+    #[serde(alias = "eps", alias = "ε")]
+    epsilon: f64,
+    #[serde(alias = "σ")]
+    sigma: f64,
+    #[serde(alias = "rc", default, skip_serializing_if = "Option::is_none")]
+    cutoff: Option<f64>,
+}
+
+#[cfg(feature = "serde")]
+impl TryFrom<KimHummerSerde> for KimHummer {
+    type Error = InvalidCutoff;
+    fn try_from(raw: KimHummerSerde) -> Result<Self, Self::Error> {
+        let kh = Self::new(raw.epsilon, raw.sigma);
+        match raw.cutoff {
+            None => Ok(kh),
+            Some(rc) => kh.with_cutoff(rc),
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+impl From<KimHummer> for KimHummerSerde {
+    fn from(kh: KimHummer) -> Self {
+        Self {
+            epsilon: kh.epsilon,
+            sigma: kh.sigma,
+            cutoff: kh.cutoff.is_finite().then_some(kh.cutoff),
+        }
+    }
 }
 
 impl KimHummer {
@@ -76,7 +124,26 @@ impl KimHummer {
     /// * `epsilon` - Interaction strength (kT). Negative for attractive, positive for repulsive.
     /// * `sigma` - Contact distance (Å)
     pub const fn new(epsilon: f64, sigma: f64) -> Self {
-        Self { epsilon, sigma }
+        Self {
+            epsilon,
+            sigma,
+            cutoff: f64::INFINITY,
+            shift: 0.0,
+        }
+    }
+
+    /// Truncate at `cutoff` and shift by U(rc) so the energy is continuous there.
+    /// The force is not shifted.
+    ///
+    /// Fails unless `cutoff` is finite and positive.
+    pub fn with_cutoff(self, cutoff: f64) -> Result<Self, InvalidCutoff> {
+        let cutoff = InvalidCutoff::check(cutoff)?;
+        let shift = self.untruncated_energy(cutoff * cutoff);
+        Ok(Self {
+            cutoff,
+            shift,
+            ..self
+        })
     }
 
     /// Returns the position of the potential cusp/minimum: r₀ = 2^(1/6) * σ
@@ -96,11 +163,10 @@ impl KimHummer {
     pub const fn sigma(&self) -> f64 {
         self.sigma
     }
-}
 
-impl IsotropicTwobodyEnergy for KimHummer {
+    /// Kim & Hummer (2008), Eqs. 2–3, without truncation.
     #[inline]
-    fn isotropic_twobody_energy(&self, distance_squared: f64) -> f64 {
+    fn untruncated_energy(&self, distance_squared: f64) -> f64 {
         let sigma_squared = self.sigma * self.sigma;
         let sr6 = (sigma_squared / distance_squared).powi(3); // (σ/r)^6
         let sr12 = sr6 * sr6; // (σ/r)^12
@@ -123,9 +189,22 @@ impl IsotropicTwobodyEnergy for KimHummer {
             0.01 * sr12
         }
     }
+}
+
+impl IsotropicTwobodyEnergy for KimHummer {
+    #[inline]
+    fn isotropic_twobody_energy(&self, distance_squared: f64) -> f64 {
+        if distance_squared >= self.cutoff_squared() {
+            return 0.0;
+        }
+        self.untruncated_energy(distance_squared) - self.shift
+    }
 
     #[inline]
     fn isotropic_twobody_force(&self, distance_squared: f64) -> f64 {
+        if distance_squared >= self.cutoff_squared() {
+            return 0.0;
+        }
         let sigma_squared = self.sigma * self.sigma;
         let x = (sigma_squared / distance_squared).powi(3);
         if self.epsilon < 0.0 {
@@ -146,10 +225,7 @@ impl IsotropicTwobodyEnergy for KimHummer {
 
 impl Cutoff for KimHummer {
     fn cutoff(&self) -> f64 {
-        f64::INFINITY
-    }
-    fn cutoff_squared(&self) -> f64 {
-        f64::INFINITY
+        self.cutoff
     }
     fn lower_cutoff(&self) -> f64 {
         self.sigma * 0.6
@@ -360,5 +436,68 @@ mod tests {
         // Neutral: always positive force (repulsive)
         let kh_neut = KimHummer::new(0.0, sigma);
         assert!(kh_neut.isotropic_twobody_force(r2) > 0.0);
+    }
+
+    // --- Optional truncation ---
+
+    fn energy_at(kh: &KimHummer, r: f64) -> f64 {
+        kh.isotropic_twobody_energy(r * r)
+    }
+
+    /// [I3] A cutoff truncates and shifts: zero at and beyond rc, U(r) − U(rc) inside.
+    #[test]
+    fn cutoff_shifts_and_truncates() {
+        let uncut = KimHummer::new(-0.5, SIGMA);
+        let cut = uncut.clone().with_cutoff(15.0).unwrap();
+        assert_eq!(cut.cutoff(), 15.0);
+        assert_eq!(energy_at(&cut, 15.0), 0.0);
+        assert_eq!(energy_at(&cut, 30.0), 0.0);
+        assert_relative_eq!(
+            energy_at(&cut, 10.0),
+            energy_at(&uncut, 10.0) - energy_at(&uncut, 15.0),
+            epsilon = 1e-12
+        );
+    }
+
+    /// [I3] `cutoff` (alias `rc`) in input gives the truncated potential.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_cutoff() {
+        let expected = KimHummer::new(-0.5, SIGMA).with_cutoff(15.0).unwrap();
+        for key in ["cutoff", "rc"] {
+            let json = format!(r#"{{"epsilon": -0.5, "sigma": 6.0, "{key}": 15.0}}"#);
+            assert_eq!(serde_json::from_str::<KimHummer>(&json).unwrap(), expected);
+        }
+    }
+
+    /// [I3] Without a cutoff the model is the published, untruncated one.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn omitted_cutoff_is_untruncated() {
+        let kh: KimHummer = serde_json::from_str(r#"{"epsilon": 0.5, "sigma": 6.0}"#).unwrap();
+        assert_eq!(kh, KimHummer::new(0.5, SIGMA));
+        assert_eq!(kh.cutoff(), f64::INFINITY);
+    }
+
+    /// [I3] A cutoff that can't bound the interaction is refused.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn non_positive_cutoff_is_refused() {
+        for rc in ["0.0", "-1.0"] {
+            let json = format!(r#"{{"epsilon": -0.5, "sigma": 6.0, "rc": {rc}}}"#);
+            assert!(
+                serde_json::from_str::<KimHummer>(&json).is_err(),
+                "rc = {rc}"
+            );
+        }
+    }
+
+    /// [I3] The builder refuses what deserialisation refuses, as an error.
+    #[test]
+    fn with_cutoff_refuses_unbounding_values() {
+        for rc in [0.0, -1.0, f64::INFINITY, f64::NAN] {
+            let result = KimHummer::new(-0.5, SIGMA).with_cutoff(rc);
+            assert!(result.is_err(), "rc = {rc}");
+        }
     }
 }
