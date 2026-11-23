@@ -336,14 +336,14 @@ impl SplinedPotential {
     /// * `config` - Configuration for the spline table
     ///
     /// # Panics
-    /// Panics if `n_points < 4`, if rsq_min >= rsq_max, or if cutoff is infinite
+    /// Panics if `n_points < 4`, if rsq_min >= rsq_max, or if cutoff is infinite or zero
     pub fn new<P: IsotropicTwobodyEnergy + Cutoff>(potential: &P, config: SplineConfig) -> Self {
         let cutoff = potential.cutoff();
         assert!(
             cutoff.is_finite(),
             "Cutoff must be finite; use with_cutoff() for potentials without Cutoff"
         );
-        Self::build(potential, cutoff, config)
+        Self::with_cutoff(potential, cutoff, config)
     }
 
     /// Create a new splined potential with an explicit cutoff distance.

@@ -131,13 +131,37 @@ impl<T: IsotropicTwobodyEnergy> AnisotropicTwobodyEnergy for T {
     }
 }
 
+/// A truncation distance that can't bound an interaction: not finite, or not positive.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InvalidCutoff(pub f64);
+
+impl InvalidCutoff {
+    /// Accept only a finite, positive distance.
+    pub fn check(cutoff: f64) -> Result<f64, Self> {
+        if cutoff.is_finite() && cutoff > 0.0 {
+            Ok(cutoff)
+        } else {
+            Err(Self(cutoff))
+        }
+    }
+}
+
+impl core::fmt::Display for InvalidCutoff {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        write!(f, "cutoff must be finite and > 0, got {}", self.0)
+    }
+}
+
+impl std::error::Error for InvalidCutoff {}
+
 /// Structure representing an interaction with always zero energy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct NoInteraction;
 
 impl Cutoff for NoInteraction {
+    /// Zero range: the identity of the sum rule (max), so empty folds add nothing.
     fn cutoff(&self) -> f64 {
-        f64::INFINITY
+        0.0
     }
 }
 
@@ -159,6 +183,7 @@ impl IsotropicTwobodyEnergy for NoInteraction {
 /// For dynamic dispatch, `Box<dyn IsotropicTwobodyEnergy>`
 /// can be aggregated using the `+` operator.
 ///
+/// Its `cutoff()` is the larger of the two: the sum interacts wherever either term does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize))]
 pub struct Combined<T, U>(T, U);
@@ -188,7 +213,7 @@ impl<T: IsotropicTwobodyEnergy + Clone, U: IsotropicTwobodyEnergy + Clone> Isotr
 
 impl<T: Cutoff, U: Cutoff> Cutoff for Combined<T, U> {
     fn cutoff(&self) -> f64 {
-        self.0.cutoff().min(self.1.cutoff())
+        self.0.cutoff().max(self.1.cutoff())
     }
     fn lower_cutoff(&self) -> f64 {
         self.0.lower_cutoff().max(self.1.lower_cutoff())
@@ -391,4 +416,79 @@ fn test_arc_potential() {
         expected_energy,
         epsilon = 1e-10
     );
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::*;
+
+    fn ah(cutoff: f64) -> AshbaughHatch {
+        AshbaughHatch::new(LennardJones::new(0.5, 4.0), 0.5, cutoff)
+    }
+
+    /// [I2] A sum interacts as far as its longest-ranged term.
+    #[test]
+    fn combined_range_is_the_longest_term() {
+        assert_eq!(Combined::new(ah(20.0), ah(40.0)).cutoff(), 40.0);
+    }
+
+    /// [I2] `NoInteraction` is the fold's identity, so a boxed sum keeps the longest range.
+    #[test]
+    fn boxed_sum_range_ignores_the_empty_seed() {
+        let pots: Vec<Box<dyn IsotropicTwobodyEnergy>> =
+            vec![Box::new(ah(20.0)), Box::new(ah(40.0))];
+        let sum: Box<dyn IsotropicTwobodyEnergy> = pots.into_iter().sum();
+        assert_eq!(sum.cutoff(), 40.0);
+        assert_eq!(NoInteraction.cutoff(), 0.0);
+    }
+
+    /// [I2] One unbounded term makes the whole sum unbounded.
+    #[test]
+    fn unbounded_term_makes_sum_unbounded() {
+        let lj = LennardJones::new(0.5, 4.0);
+        assert_eq!(Combined::new(lj, ah(20.0)).cutoff(), f64::INFINITY);
+    }
+
+    /// [I1] Every finite-range potential is exactly zero at and beyond its cutoff.
+    #[test]
+    fn energy_vanishes_beyond_cutoff() {
+        use coulomb::pairwise::{EwaldTruncated, Plain, ReactionField};
+        use coulomb::permittivity::ConstantPermittivity;
+        let water = ConstantPermittivity::new(80.0);
+        let pots: Vec<Box<dyn IsotropicTwobodyEnergy>> = vec![
+            Box::new(ah(20.0)),
+            Box::new(KimHummer::new(-0.5, 6.0).with_cutoff(15.0).unwrap()),
+            Box::new(KimHummer::new(0.5, 6.0).with_cutoff(15.0).unwrap()),
+            Box::new(WeeksChandlerAndersen::new(0.5, 4.0)),
+            Box::new(HardSphere::new(4.0)),
+            Box::new(Combined::new(ah(20.0), ah(40.0))),
+            Box::new(NoInteraction),
+            Box::new(IonIon::new(1.0, water, Plain::new(30.0, None))),
+            Box::new(IonIon::new(1.0, water, Plain::new(30.0, Some(10.0)))),
+            Box::new(IonIon::new(1.0, water, EwaldTruncated::new(30.0, 0.1))),
+            Box::new(IonIon::new(
+                1.0,
+                water,
+                ReactionField::new_shifted(30.0, 80.0, 1.0),
+            )),
+        ];
+        for pot in &pots {
+            let rc = pot.cutoff();
+            assert!(rc.is_finite(), "{pot:?}");
+            for r in [rc, 1.5 * rc] {
+                assert_eq!(
+                    pot.isotropic_twobody_energy(r * r),
+                    0.0,
+                    "{pot:?} at r = {r}"
+                );
+            }
+        }
+    }
+
+    /// A zero-range potential has nothing to tabulate; say so instead of a bounds panic.
+    #[test]
+    #[should_panic(expected = "finite and positive")]
+    fn splining_no_interaction_is_refused() {
+        SplinedPotential::new(&NoInteraction, SplineConfig::default());
+    }
 }

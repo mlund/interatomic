@@ -9,6 +9,7 @@ A Rust library for calculating interatomic interactions such as van der Waals, e
 ## Features
 
 - **Two-body potentials**: Lennard-Jones, Mie, Morse, WCA, FENE, Harmonic, Hard Sphere, Ashbaugh-Hatch, Kim-Hummer, Urey-Bradley
+- **Interaction range**: `Cutoff::cutoff()` is the distance beyond which the energy is zero; a sum of potentials reaches as far as its longest term
 - **Electrostatics**: Ion-ion interactions with Plain Coulomb, Yukawa, and polarization schemes (via [coulomb](https://crates.io/crates/coulomb) crate)
 - **Three-body potentials**: Harmonic and Cosine angle/torsion potentials
 - **Four-body potentials**: Harmonic and Periodic dihedral potentials
