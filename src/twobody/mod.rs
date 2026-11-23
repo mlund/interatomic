@@ -54,7 +54,7 @@ pub use hermite::{
     SplineTableSimdF32, LANES_F32,
 };
 pub use hermite::{
-    spline_potential, GridTrim, GridType, SplineCoeffs, SplineConfig, SplineStats,
+    spline_potential, GridTrim, GridType, SplineCoeffs, SplineConfig, SplineError, SplineStats,
     SplinedPotential, ValidationResult,
 };
 pub use kimhummer::KimHummer;
@@ -132,7 +132,8 @@ impl<T: IsotropicTwobodyEnergy> AnisotropicTwobodyEnergy for T {
 }
 
 /// A truncation distance that can't bound an interaction: not finite, or not positive.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+#[error("cutoff must be finite and > 0, got {0}")]
 pub struct InvalidCutoff(pub f64);
 
 impl InvalidCutoff {
@@ -145,14 +146,6 @@ impl InvalidCutoff {
         }
     }
 }
-
-impl core::fmt::Display for InvalidCutoff {
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-        write!(f, "cutoff must be finite and > 0, got {}", self.0)
-    }
-}
-
-impl std::error::Error for InvalidCutoff {}
 
 /// Structure representing an interaction with always zero energy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -485,10 +478,34 @@ mod range_tests {
         }
     }
 
-    /// A zero-range potential has nothing to tabulate; say so instead of a bounds panic.
+    /// A zero- or unbounded-range potential can't be tabulated from its own range.
     #[test]
-    #[should_panic(expected = "finite and positive")]
-    fn splining_no_interaction_is_refused() {
-        SplinedPotential::new(&NoInteraction, SplineConfig::default());
+    fn splining_without_a_finite_range_is_an_error() {
+        let config = SplineConfig::default();
+        assert_eq!(
+            SplinedPotential::new(&NoInteraction, config.clone()).unwrap_err(),
+            SplineError::InvalidCutoff(InvalidCutoff(0.0))
+        );
+        assert_eq!(
+            SplinedPotential::new(&LennardJones::new(0.5, 4.0), config.clone()).unwrap_err(),
+            SplineError::Unbounded
+        );
+    }
+
+    /// NaN fails every comparison, so the config is validated before use.
+    #[test]
+    fn nan_spline_parameters_are_errors() {
+        let lj = LennardJones::new(0.5, 4.0);
+        let base = SplineConfig::default;
+        let cap = |energy_cap| GridTrim::RepulsiveDecay { energy_cap };
+        for config in [
+            base().with_rsq_max(f64::NAN),
+            base().with_rsq_min(f64::NAN),
+            base().with_grid_type(GridType::PowerLaw(f64::NAN)),
+            base().with_grid_trim(cap(f64::NAN)),
+            base().with_grid_trim(cap(-1.0)),
+        ] {
+            assert!(SplinedPotential::with_cutoff(&lj, 10.0, config).is_err());
+        }
     }
 }

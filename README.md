@@ -101,7 +101,7 @@ let lj = LennardJones::new(1.0, 3.0);
 let config = SplineConfig::default();
 let cutoff = 12.0;
 
-let splined = SplinedPotential::with_cutoff(&lj, cutoff, config);
+let splined = SplinedPotential::with_cutoff(&lj, cutoff, config).unwrap();
 let energy = splined.isotropic_twobody_energy(9.0);
 ```
 

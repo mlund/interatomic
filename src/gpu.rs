@@ -11,7 +11,7 @@
 //! use interatomic::twobody::{LennardJones, SplinedPotential, SplineConfig};
 //!
 //! let lj = LennardJones::new(1.0, 1.0);
-//! let splined = SplinedPotential::with_cutoff(&lj, 2.5, SplineConfig::default());
+//! let splined = SplinedPotential::with_cutoff(&lj, 2.5, SplineConfig::default()).unwrap();
 //!
 //! let mut gpu = GpuSplineData::<PowerLaw2>::new();
 //! gpu.push(&splined);
@@ -338,7 +338,8 @@ mod tests {
             &lj,
             2.5,
             SplineConfig::default().with_grid_type(GridType::PowerLaw2),
-        );
+        )
+        .unwrap();
         let mut gpu = GpuSplineData::<PowerLaw2>::new();
         gpu.push(&splined);
 
@@ -354,7 +355,8 @@ mod tests {
             &lj,
             2.5,
             SplineConfig::default().with_grid_type(GridType::InverseRsq),
-        );
+        )
+        .unwrap();
         let mut gpu = GpuSplineData::<InverseRsq>::new();
         gpu.push(&splined);
 
@@ -371,8 +373,8 @@ mod tests {
             n_points: 100,
             ..SplineConfig::default()
         };
-        let s1 = SplinedPotential::with_cutoff(&lj1, 2.5, config.clone());
-        let s2 = SplinedPotential::with_cutoff(&lj2, 3.0, config);
+        let s1 = SplinedPotential::with_cutoff(&lj1, 2.5, config.clone()).unwrap();
+        let s2 = SplinedPotential::with_cutoff(&lj2, 3.0, config).unwrap();
 
         let mut gpu = GpuSplineData::<PowerLaw2>::new();
         gpu.push(&s1);
@@ -391,7 +393,8 @@ mod tests {
             &lj,
             2.5,
             SplineConfig::default().with_grid_type(GridType::PowerLaw2),
-        );
+        )
+        .unwrap();
         let mut gpu = GpuSplineData::<PowerLaw2>::new();
         gpu.push(&splined);
 
@@ -417,7 +420,8 @@ mod tests {
             &lj,
             2.5,
             SplineConfig::default().with_grid_type(GridType::UniformR),
-        );
+        )
+        .unwrap();
         let mut gpu = GpuSplineData::<PowerLaw2>::new();
         gpu.push(&splined);
     }
@@ -426,8 +430,8 @@ mod tests {
     fn from_potentials() {
         let lj = LennardJones::new(1.0, 1.0);
         let config = SplineConfig::default();
-        let s1 = SplinedPotential::with_cutoff(&lj, 2.5, config.clone());
-        let s2 = SplinedPotential::with_cutoff(&lj, 3.0, config);
+        let s1 = SplinedPotential::with_cutoff(&lj, 2.5, config.clone()).unwrap();
+        let s2 = SplinedPotential::with_cutoff(&lj, 3.0, config).unwrap();
         let potentials = vec![s1, s2];
         let gpu = GpuSplineData::<PowerLaw2>::from_potentials(&potentials);
         assert_eq!(gpu.params.len(), 2);
