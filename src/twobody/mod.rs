@@ -478,14 +478,10 @@ mod range_tests {
         }
     }
 
-    /// A zero- or unbounded-range potential can't be tabulated from its own range.
+    /// An unbounded potential can't be tabulated from its own range.
     #[test]
-    fn splining_without_a_finite_range_is_an_error() {
+    fn splining_an_unbounded_range_is_an_error() {
         let config = SplineConfig::default();
-        assert_eq!(
-            SplinedPotential::new(&NoInteraction, config.clone()).unwrap_err(),
-            SplineError::InvalidCutoff(InvalidCutoff(0.0))
-        );
         assert_eq!(
             SplinedPotential::new(&LennardJones::new(0.5, 4.0), config.clone()).unwrap_err(),
             SplineError::Unbounded

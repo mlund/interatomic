@@ -37,7 +37,7 @@
 //! }
 //! ```
 
-use super::{InvalidCutoff, IsotropicTwobodyEnergy};
+use super::{InvalidCutoff, IsotropicTwobodyEnergy, NoInteraction};
 use coulomb::Cutoff;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -216,7 +216,9 @@ pub struct SplineConfig {
     pub rsq_min: Option<f64>,
     /// Maximum r² value / cutoff² (default: from Cutoff trait)
     pub rsq_max: Option<f64>,
-    /// Shift energy to zero at cutoff (default: true)
+    /// Shift energy to zero at cutoff (default: true). A no-op for a potential
+    /// that vanishes at the table's end, as every built-in one does at its own
+    /// cutoff unless `rsq_max` moves the end.
     pub shift_energy: bool,
     /// Apply shift-force correction (default: false)
     /// When true, both U(rc) = 0 and F(rc) = 0
@@ -395,17 +397,37 @@ impl SplinedPotential {
     /// * `potential` - The analytical potential to tabulate (must implement Cutoff)
     /// * `config` - Configuration for the spline table
     ///
+    /// A zero range gives an all-zero table, ignoring the bounds, so absent
+    /// pairs need no special case.
+    ///
     /// # Errors
     /// [`SplineError::Unbounded`] for an infinite range, otherwise as [`Self::with_cutoff`].
     pub fn new<P: IsotropicTwobodyEnergy + Cutoff>(
         potential: &P,
         config: SplineConfig,
     ) -> Result<Self, SplineError> {
-        let cutoff = potential.cutoff();
-        if cutoff == f64::INFINITY {
-            return Err(SplineError::Unbounded);
+        match potential.cutoff() {
+            f64::INFINITY => Err(SplineError::Unbounded),
+            0.0 => Self::zero(config),
+            cutoff => Self::with_cutoff(potential, cutoff, config),
         }
-        Self::with_cutoff(potential, cutoff, config)
+    }
+
+    /// Zero over a nominal 1 Å table; reports range 0, like [`NoInteraction`].
+    /// Minimal, as nothing varies across it.
+    fn zero(config: SplineConfig) -> Result<Self, SplineError> {
+        let config = SplineConfig {
+            n_points: 4,
+            rsq_min: None,
+            rsq_max: None,
+            grid_trim: GridTrim::NoTrim,
+            ..config
+        };
+        let table = Self::build(&NoInteraction, 1.0, config)?;
+        Ok(Self {
+            cutoff: 0.0,
+            ..table
+        })
     }
 
     /// Create a new splined potential with an explicit cutoff distance.
@@ -761,10 +783,11 @@ impl<'a> IntervalData<'a> {
 }
 
 impl SplinedPotential {
-    /// Get the squared cutoff distance.
+    /// Const twin of [`Cutoff::cutoff_squared`]: the potential's range, not the
+    /// table's extent ([`Self::r_max`]).
     #[inline]
     pub const fn cutoff_squared(&self) -> f64 {
-        self.r_max * self.r_max
+        self.cutoff * self.cutoff
     }
 
     /// Compute spline interval index and fractional position for a given r² value.
@@ -890,11 +913,6 @@ impl Cutoff for SplinedPotential {
     #[inline]
     fn cutoff(&self) -> f64 {
         self.cutoff
-    }
-
-    #[inline]
-    fn cutoff_squared(&self) -> f64 {
-        self.r_max * self.r_max
     }
 
     #[inline]
@@ -2060,8 +2078,40 @@ fn find_r_at_energy<P: IsotropicTwobodyEnergy>(
 mod tests {
     use super::*;
     use crate::twobody::{AshbaughHatch, Combined, IonIon, LennardJones};
+    use approx::assert_relative_eq;
     use coulomb::pairwise::Yukawa;
     use coulomb::permittivity::ConstantPermittivity;
+
+    /// No range, nothing to tabulate: an all-zero table, not an error.
+    #[test]
+    fn zero_range_tabulates_zero() {
+        let spline = SplinedPotential::new(&NoInteraction, SplineConfig::default()).unwrap();
+        assert_eq!((spline.cutoff(), spline.cutoff_squared()), (0.0, 0.0));
+        let (simd, simd_f32) = (spline.to_simd(), spline.to_simd_f32());
+        for r in [0.1, 0.5, 1.0, 10.0] {
+            let rsq = r * r;
+            assert_eq!(spline.isotropic_twobody_energy(rsq), 0.0, "r = {r}");
+            assert_eq!(simd.energy(rsq), 0.0, "simd, r = {r}");
+            assert_eq!(simd_f32.energy(rsq as f32), 0.0, "simd_f32, r = {r}");
+        }
+    }
+
+    /// Over its own range a potential is the model, so a cut but unshifted pair
+    /// keeps its value up to rc even with the default `shift_energy`.
+    #[test]
+    fn own_range_is_not_shifted() {
+        let water = ConstantPermittivity::new(80.0);
+        let cut = IonIon::new(1.0, water, coulomb::pairwise::Plain::new(30.0, None));
+        let spline = SplinedPotential::new(&cut, SplineConfig::default()).unwrap();
+        for r in [10.0, 20.0, 29.0] {
+            let exact = cut.isotropic_twobody_energy(r * r);
+            assert_relative_eq!(
+                spline.isotropic_twobody_energy(r * r),
+                exact,
+                max_relative = 1e-4
+            );
+        }
+    }
 
     /// Test cubic Hermite spline for AshbaughHatch + Yukawa from 0 to 100 Å.
     ///
