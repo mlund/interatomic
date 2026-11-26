@@ -293,8 +293,8 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn serde_wca_flag() {
-        let yaml = r#"{ epsilon: 1.5, sigma: 2.0, wca: true }"#;
-        let ah: AshbaughHatch = serde_json::from_str(yaml).unwrap();
+        let json = r#"{ "epsilon": 1.5, "sigma": 2.0, "wca": true }"#;
+        let ah: AshbaughHatch = serde_json::from_str(json).unwrap();
         assert!(ah.is_wca());
         assert_eq!(ah.lambda, 1.0);
     }
