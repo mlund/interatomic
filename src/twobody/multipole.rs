@@ -77,6 +77,16 @@ impl<T: MultipoleEnergy> IonIon<T> {
             scheme,
         }
     }
+
+    /// Energy of a charge `z` with its own scheme-specific neutralising cloud (kJ/mol).
+    ///
+    /// Nonzero only for truncated schemes that carry a monopole self term (e.g. Fanourgakis);
+    /// a move that changes Σz² must add it or bias the acceptance. Independent of the stored
+    /// charge product, so one pair potential serves every particle of a kind.
+    pub fn self_energy(&self, z: f64) -> f64 {
+        coulomb::TO_CHEMISTRY_UNIT / f64::from(self.permittivity)
+            * self.scheme.self_energy(&[z], &[])
+    }
 }
 
 impl<T: MultipoleEnergy + Debug + Clone + PartialEq + Send + Sync> IsotropicTwobodyEnergy
@@ -276,4 +286,41 @@ mod tests {
         check(&IonIon::new(1.0, permittivity, coulomb::pairwise::Yukawa::new(30.0, Some(8.0))));
     }
 
+    /// Fanourgakis et al., doi:10.1063/1.3216520: u_self = −7/8 z² / r_c (Bjerrum units).
+    #[test]
+    fn fanourgakis_self_energy_is_minus_seven_eighths() {
+        let (permittivity, cutoff, z) = (80.0, 80.0, -2.0);
+        let ionion = IonIon::new(
+            0.0,
+            ConstantPermittivity::new(permittivity),
+            coulomb::pairwise::Fanourgakis::new(cutoff, None),
+        );
+        let expected = -7.0 / 8.0 * z * z / cutoff * coulomb::TO_CHEMISTRY_UNIT / permittivity;
+        assert_relative_eq!(ionion.self_energy(z), expected, max_relative = 1e-12);
+    }
+
+    /// The self term is half the short-range limit of the pair energy minus the untruncated
+    /// (screened) Coulomb potential, which ties it to the pair's own κ and permittivity. The
+    /// Debye–Hückel self term of the implicit salt is excluded: it is not a truncation artefact.
+    #[test]
+    fn self_energy_is_half_the_short_range_limit() {
+        let permittivity = ConstantPermittivity::new(80.0);
+        let z: f64 = 1.5;
+        for debye_length in [None, Some(8.0)] {
+            let scheme = coulomb::pairwise::Fanourgakis::new(30.0, debye_length);
+            let ionion = IonIon::new(z * z, permittivity, scheme);
+            let r: f64 = 1e-4;
+            let screening = debye_length.map_or(1.0, |l| (-r / l).exp());
+            let bare = coulomb::TO_CHEMISTRY_UNIT / 80.0 * z * z / r * screening;
+            let limit = ionion.isotropic_twobody_energy(r * r) - bare;
+            assert_relative_eq!(ionion.self_energy(z), 0.5 * limit, max_relative = 1e-3);
+        }
+    }
+
+    #[test]
+    fn plain_coulomb_has_no_self_energy() {
+        let permittivity = ConstantPermittivity::new(80.0);
+        let ionion = IonIon::new(1.0, permittivity, Plain::new(30.0, Some(8.0)));
+        assert_eq!(ionion.self_energy(1.0), 0.0);
+    }
 }
